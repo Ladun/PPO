@@ -1,0 +1,52 @@
+device: "cpu"
+seed: 77
+env:
+    env_name: "Ant-v4"
+    is_continuous: True
+    state_dim: 27
+    action_dim: 8
+checkpoint_path: "."
+actor: 
+    action_std_init: 0.1
+    arch: [
+        [nn.Linear, [state_dim, 64]],
+        [nn.Tanh, []],
+        [nn.Linear, [64, 64]],
+        [nn.Tanh, []],
+        [nn.Linear, [64, action_dim]],
+        [nn.Tanh, []]
+    ]
+    optimizer:
+        lr: 3e-4
+        betas: [0.9, 0.999]
+        eps: 1e-5
+critic: 
+    arch: [
+        [nn.Linear, [state_dim, 64]],
+        [nn.Tanh, []],
+        [nn.Linear, [64, 64]],
+        [nn.Tanh, []],
+        [nn.Linear, [64, 1]]
+    ]
+    optimizer:
+        lr: 3e-4
+        betas: [0.9, 0.999]
+        eps: 1e-5
+train: 
+    max_episodes: 1000
+    max_episode_len: 2048
+    gamma: 0.99
+    tau: 0.95
+    ppo:
+        loss_type: clip
+        optim_epochs: 10
+        memory_size: 2048
+        batch_size: 64
+        eps_clip: 0.2
+        coef_value_function: 0.5
+        coef_entropy_penalty: 0.001
+        value_cliiping: False
+    clipping_gradient: True
+    average_interval: 100
+    log_interval: 100
+    save_interval: 100
