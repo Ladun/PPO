@@ -48,7 +48,7 @@ def get_config(yaml_file=None, yaml_string=None, exp_name=None, overwrite_exp=Fa
     if exp_name is None:    
         exp_name = f"exp{get_cur_time_code()}"
     # save old exp_name
-    if "exp_name" in conf:       
+    if "exp_name" in conf:  
         if overwrite_exp:
             conf.old_exp_name = conf.exp_name
             conf.exp_name = exp_name

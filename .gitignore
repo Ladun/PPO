@@ -2,7 +2,8 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,python
 
 
-*__test__.py
+*__test__.*
+experiments/*
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

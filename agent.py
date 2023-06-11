@@ -16,7 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 from env import TrainEnvironment
 from replay_buffer import PPOMemory
 from model import Actor, Critic
-from utils import set_seed, pretty_config
+from utils.general import set_seed, pretty_config
+from utils.stuff import RewardScaler, ObservationScaler
 
 class PPOAgent:
     def __init__(self, config, device):
@@ -42,6 +43,17 @@ class PPOAgent:
                 optimizer=self.optimizer,
                 lr_lambda=lambda epoch: 1 - epoch / self.config.train.max_episodes
             )
+        
+        # [EXPERIMENT] - reward scaler: r / rs.std()
+        if self.config.train.reward_scaler:
+            self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
+
+        # [EXPERIMENT] - observation scaler: (ob - ob.mean()) / (ob.std())
+        # if self.config.train_observation_scaler:
+        #     self.obs_scaler = ObservationScaler()
+
+        self.writer = None
+        self.memory = None
 
         print("----------- Config -----------")
         pretty_config(config)
@@ -128,7 +140,7 @@ class PPOAgent:
 
         # -------- PPO Training Loop --------
 
-        for i in range(self.config.train.ppo.optim_epochs):
+        for _ in range(self.config.train.ppo.optim_epochs):
             data_loader = ppo_iter(self.config.train.ppo.batch_size, data)
 
             for batch in data_loader:
@@ -163,8 +175,8 @@ class PPOAgent:
 
                 if self.config.train.ppo.value_cliiping:
                     cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
-                    vloss1 = F.smooth_l1_loss(cur_v - vtarg)
-                    vloss2 = F.smooth_l1_loss(cur_v_clipped - vtarg)
+                    vloss1 = F.smooth_l1_loss(cur_v, vtarg)
+                    vloss2 = F.smooth_l1_loss(cur_v_clipped, vtarg)
                     vf_loss = torch.max(vloss1, vloss2)
                 else:
                     vf_loss =  F.smooth_l1_loss(cur_v, vtarg)
@@ -260,13 +272,16 @@ class PPOAgent:
                 #   (1, state_dim),   (1,),     (1,), (1,)
                 with torch.no_grad():
                     state = torch.tensor(state).unsqueeze(0).float()
-                    action, logprobs, ent = self.actor(state)
+                    action, logprobs, _ = self.actor(state)
                     values = self.critic(state).squeeze(1)
                 next_state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
 
                 # update episode_score
                 episode_score += reward
+
+                if self.config.train.reward_scaler:
+                    reward = self.reward_scaler(reward, update=True)
 
                 # add experience to the memory
                 self.memory.store(
@@ -334,7 +349,7 @@ class PPOAgent:
             # Save best model
             if avg_score >= best_score and self.episode >= self.config.train.max_episodes * 0.1:
                 # print(f"[Info] found best model at episode: {self.episode}")
-                self.save(f'best{self.episode}')
+                self.save(f'best')
                 best_score = avg_score
 
             if self.episode % self.config.train.save_interval == 0:
@@ -367,13 +382,11 @@ class PPOAgent:
         img.save(fp=gif_path, format='GIF', append_images=imgs, save_all=True, optimize=True, duration=frame_duration, loop=0)
 
     
-    def play(self, ckpt, num_episodes=1, max_ep_len=100, use_rendering=False):  
+    def play(self, num_episodes=1, max_ep_len=100, use_rendering=False):  
 
         if use_rendering:
             image_path = os.path.join(self.get_experiments_base_path(), "render_images")
             os.makedirs(image_path, exist_ok=True)
-
-        self.load(ckpt)
 
         env = TrainEnvironment(
             env_name=self.config.env.env_name,
