@@ -43,7 +43,6 @@ class PPOAgent:
                 optimizer=self.optimizer,
                 lr_lambda=lambda epoch: 1 - epoch / self.config.train.max_episodes
             )
-        
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
             self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
@@ -283,7 +282,7 @@ class PPOAgent:
 
                 if self.config.train.reward_scaler:
                     reward = self.reward_scaler(reward, update=True)
-
+                    
                 # add experience to the memory
                 self.memory.store(
                     s=state,
@@ -388,7 +387,7 @@ class PPOAgent:
         if use_rendering:
             image_path = os.path.join(self.get_experiments_base_path(), "render_images")
             os.makedirs(image_path, exist_ok=True)
-
+            
         env = TrainEnvironment(
             env_name=self.config.env.env_name,
             is_continuous=self.config.env.is_continuous,
