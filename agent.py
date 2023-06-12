@@ -32,7 +32,7 @@ class PPOAgent:
         self.actor      = Actor(config, device)
         self.critic     = Critic(config)
         self.optimizer  = torch.optim.Adam([
-            {'params': self.actor.parameters(), 
+            {'params': self.actor.parameters(),
              **config.actor.optimizer},
             {'params': self.critic.parameters(),
              **config.critic.optimizer}
@@ -54,6 +54,7 @@ class PPOAgent:
 
         self.writer = None
         self.memory = None
+        self.episode = 0
 
         print("----------- Config -----------")
         pretty_config(config)
@@ -173,7 +174,7 @@ class PPOAgent:
                 cur_v = self.critic(ob)
                 cur_v = cur_v.reshape(-1)
 
-                if self.config.train.ppo.value_cliiping:
+                if self.config.train.ppo.value_clipping:
                     cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
                     vloss1 = F.smooth_l1_loss(cur_v, vtarg)
                     vloss2 = F.smooth_l1_loss(cur_v_clipped, vtarg)
