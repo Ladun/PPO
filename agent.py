@@ -41,7 +41,7 @@ class PPOAgent:
         if self.config.train.scheduler:
             self.scheduler  = torch.optim.lr_scheduler.LambdaLR(
                 optimizer=self.optimizer,
-                lr_lambda=lambda epoch: 1 - epoch / self.config.train.max_episodes
+                lr_lambda=lambda epoch: max(1.0 - float(epoch / self.config.train.max_episodes), 0)
             )
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
@@ -321,7 +321,8 @@ class PPOAgent:
                 if done:
                     score_queue.append(episode_score)
                     length_queue.append(t)
-                    break
+                    state, _ = env.reset()
+                    continue
                 
                 # update state
                 state = next_state
@@ -338,7 +339,7 @@ class PPOAgent:
 
             # Writting for tensorboard
             self.writer.add_scalar("train/score", avg_score, self.episode)
-            self.writer.add_scalar("train/duration", avg_score, self.episode)
+            self.writer.add_scalar("train/duration", avg_duration, self.episode)
             if self.config.train.scheduler:
                 for idx, lr in enumerate(self.scheduler.get_lr()):
                     self.writer.add_scalar(f"train/learning_rate{idx}", lr, self.episode)
