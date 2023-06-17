@@ -48,7 +48,7 @@ train:
         value_clipping: False
     reward_scaler: True
     clipping_gradient: True
-    scheduler: False
+    scheduler: True
     average_interval: 100
     log_interval: 100
     save_interval: 100

@@ -58,8 +58,10 @@ class PPOAgent:
         print("----------- Config -----------")
         pretty_config(config)
 
+
     def get_experiments_base_path(self):
         return os.path.join(self.config.checkpoint_path, 'experiments', self.config.env.env_name, self.config.exp_name)
+    
 
     def save(self, postfix):
         '''
@@ -256,10 +258,11 @@ class PPOAgent:
         
         for episode in range(1, self.config.train.max_episodes + 1):
             self.episode = episode
-            episode_score = 0
 
             # shape
             # state: (obserbation_size, )
+            episode_score = 0
+            duration = 0
             state, _ = env.reset()
 
             for t in range(1, self.config.train.max_episode_len + 1):
@@ -279,6 +282,7 @@ class PPOAgent:
 
                 # update episode_score
                 episode_score += reward
+                duration += 1
 
                 if self.config.train.reward_scaler:
                     reward = self.reward_scaler(reward, update=True)
@@ -320,7 +324,9 @@ class PPOAgent:
 
                 if done:
                     score_queue.append(episode_score)
-                    length_queue.append(t)
+                    length_queue.append(duration)
+                    episode_score = 0
+                    duration = 0
                     state, _ = env.reset()
                     continue
                 
@@ -360,7 +366,7 @@ class PPOAgent:
         self.save('last')
         return best_score
 
-    def make_gif_from_images(self, total_timesteps = 300, step = 10, frame_duration = 150):
+    def make_gif_from_images(self, total_timesteps = 500, step = 2, frame_duration = 150):
 
         # Make gif directories
         gif_path = os.path.join(self.get_experiments_base_path(), "gif_path")
@@ -397,6 +403,7 @@ class PPOAgent:
         env.init(render_mode='rgb_array')
 
         scores = []
+        durations = []
 
         for episode in range(num_episodes):
 
@@ -429,12 +436,15 @@ class PPOAgent:
 
                 # game over condition
                 if done:
-                    scores.append(episode_score)
                     break
-            print(f"Episode {episode}: score - {episode_score}")
+
+            scores.append(episode_score)
+            durations.append(t)
+            print(f"Episode {episode}: score - {episode_score} duration - {t}")
 
         avg_score = np.mean(scores)
-        print(f"Average score {avg_score} on {num_episodes} games")               
+        avg_duration = np.mean(durations)
+        print(f"Average score {avg_score}, duration {avg_duration} on {num_episodes} games")               
         env.close()
 
         if use_rendering:

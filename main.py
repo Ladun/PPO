@@ -32,7 +32,7 @@ def main():
     if args.eval:
         trainer.play(
             num_episodes=10,
-            max_ep_len=300,
+            max_ep_len=2048,
             use_rendering=True
         )
         
