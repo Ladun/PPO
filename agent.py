@@ -366,7 +366,7 @@ class PPOAgent:
         self.save('last')
         return best_score
 
-    def make_gif_from_images(self, total_timesteps = 500, step = 2, frame_duration = 150):
+    def make_gif_from_images(self, total_timesteps = 500, step = 2, frame_duration = 100):
 
         # Make gif directories
         gif_path = os.path.join(self.get_experiments_base_path(), "gif_path")

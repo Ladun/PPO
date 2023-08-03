@@ -1,5 +1,5 @@
 device: "cpu"
-seed: 77
+seed: 11
 env:
     env_name: "Humanoid-v4"
     is_continuous: True
@@ -29,11 +29,11 @@ critic:
         [nn.Linear, [64, 1]]
     ]
     optimizer:
-        lr: 1e-4
+        lr: 2e-4
         betas: [0.9, 0.999]
         eps: 1e-5
 train: 
-    max_episodes: 1000
+    max_episodes: 3000
     max_episode_len: 2048
     gamma: 0.99
     tau: 0.95
