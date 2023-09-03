@@ -1,4 +1,6 @@
 
+import omegaconf
+
 import torch
 from torch import nn
 from torch.distributions import MultivariateNormal
@@ -8,18 +10,28 @@ from torch.distributions import Categorical
 def get_model(model_info, **kwargs):
     # Make the model based on the value written in config.
 
-    model = []
+    def get_value(tmp):
+        if isinstance(tmp, omegaconf.listconfig.ListConfig):
+            return sum([get_value(_tmp) for _tmp in tmp])
+        if isinstance(tmp, str):
+            return kwargs[tmp]
+        
+        return tmp
+
+    # Function body
+    model = []  
     for _, info in enumerate(model_info):
         # Module name
         m = info[0] 
         # Convert str value to value defined in kwargs
-        v = [kwargs[t] if isinstance(t, str) else t for t in info[1]]
+        v = [get_value(t) for t in info[1]]
         # index for where to use the value
         # idx = info[1]
 
         model.append(eval(m)(*v))
 
     return nn.Sequential(*model)
+
 
 
 class Actor(nn.Module):
@@ -93,3 +105,34 @@ class Critic(nn.Module):
 
     def forward(self, inp):
         return self.m(inp)
+
+
+class Discriminator(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.is_cont    = config.env.is_continuous
+        self.action_dim = config.env.action_dim
+
+        self.m = get_model(
+            config.gail.arch,
+            state_dim=config.env.state_dim,
+            action_dim=config.env.action_dim
+        )
+
+    def forward(self, state, action):
+        if not self.is_cont:
+            action = torch.nn.functional.one_hot(action, self.action_dim).float()
+        state_action = torch.cat([state, action], dim=1)
+
+        r = self.m(state_action)
+
+        return r
+    
+    def get_irl_reward(self, state, action):
+        logit = self.forward(state, action)
+        prob = torch.sigmoid(logit)
+
+        reward = -torch.log(prob)
+
+        return  reward

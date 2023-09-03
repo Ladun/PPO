@@ -1,6 +1,7 @@
 
 import os
 import random
+import logging
 from datetime import datetime
 import numpy as np
 
@@ -47,6 +48,7 @@ def get_config(yaml_file=None, yaml_string=None, exp_name=None, overwrite_exp=Fa
     # --- Create experiment name ---
     if exp_name is None:    
         exp_name = f"exp{get_cur_time_code()}"
+
     # save old exp_name
     if "exp_name" in conf:  
         if overwrite_exp:
@@ -54,8 +56,12 @@ def get_config(yaml_file=None, yaml_string=None, exp_name=None, overwrite_exp=Fa
             conf.exp_name = exp_name
     else:
         conf.exp_name = exp_name
-
+        
     return conf
+
+
+def get_experiments_base_path(config):
+    return os.path.join(config.checkpoint_path, 'experiments', config.env.env_name, config.exp_name)
 
 
 def get_device(device=None):
@@ -79,12 +85,15 @@ def set_seed(seed):
     random.seed(seed)
 
 
-def pretty_config(config, indent_level=0):
+def pretty_config(config, indent_level=0, logger=None):
+
+    print_func = logger.info if logger else print
+
     tab = '\t' * indent_level
 
     for k, v in config.items():
         if isinstance(v, omegaconf.dictconfig.DictConfig):
-            print(f"{tab}{k}:")
+            print_func(f"{tab}{k}:")
             pretty_config(v, indent_level + 1)
         else:
-            print(f"{tab}{k}: {v}")
+            print_func(f"{tab}{k}: {v}")

@@ -1,6 +1,10 @@
 
+import logging
+
 import torch
 import gymnasium as gym
+
+logger = logging.getLogger(__name__)
 
 # currently we support only gym env
 class TrainEnvironment:
@@ -16,7 +20,7 @@ class TrainEnvironment:
         self.action_dim = None
 
     def init(self, render_mode=None):
-        print("(Init) training environment name : " + self.env_name)
+        logger.info("(Init) training environment name : " + self.env_name)
 
         self.env = gym.make(self.env_name, render_mode=render_mode)
         # state space dimension
