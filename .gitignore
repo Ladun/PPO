@@ -4,6 +4,7 @@
 
 *__test__.*
 experiments/*
+experts/*
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
