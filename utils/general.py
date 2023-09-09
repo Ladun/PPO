@@ -85,6 +85,23 @@ def set_seed(seed):
     random.seed(seed)
 
 
+def get_rng_state():
+    rng_state_dict = {
+        'cpu_rng_state': torch.get_rng_state(),
+        'gpu_rng_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+        'numpy_rng_state': np.random.get_state(),
+        'py_rng_state': random.getstate()
+    }
+    return rng_state_dict
+
+def set_rng_state(rng_state_dict):
+    torch.set_rng_state(rng_state_dict['cpu_rng_state'])
+    if torch.cuda.is_available():
+        torch.cuda.set_rng_state(rng_state_dict['gpu_rng_state'])
+    np.random.set_state(rng_state_dict['numpy_rng_state'])
+    random.setstate(rng_state_dict['py_rng_state'])
+
+
 def pretty_config(config, indent_level=0, logger=None):
 
     print_func = logger.info if logger else print
@@ -94,6 +111,6 @@ def pretty_config(config, indent_level=0, logger=None):
     for k, v in config.items():
         if isinstance(v, omegaconf.dictconfig.DictConfig):
             print_func(f"{tab}{k}:")
-            pretty_config(v, indent_level + 1)
+            pretty_config(v, indent_level + 1, logger)
         else:
             print_func(f"{tab}{k}: {v}")

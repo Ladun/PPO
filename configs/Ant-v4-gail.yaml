@@ -44,7 +44,8 @@ gail:
     ]
     optimizer:
         lr: 1e-4
-        # betas: [0.9, 0.999]
+        betas: [0.9, 0.999]
+        eps: 1e-5  
 train: 
     max_episodes: 1500
     max_episode_len: 2048
@@ -60,10 +61,11 @@ train:
         coef_entropy_penalty: 0.001
         value_clipping: False
     gail:
-        dstep: 1
+        epoch: 1
+        batch_size: 512
     reward_scaler: True
     clipping_gradient: True
     scheduler: True
     average_interval: 100
-    log_interval: 100
+    log_interval: 20
     save_interval: 100
