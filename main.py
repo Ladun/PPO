@@ -16,7 +16,11 @@ def parse_args():
     parser.add_argument("--eval", action='store_true')
     parser.add_argument("--eval_n_episode", type=int, default=10)
     parser.add_argument("--load_postfix", type=str, default=None,
-                        help="pretrained model prefix(ex/ number of episode, 'best' or 'last') to play")
+                        help="pretrained model prefix(ex/ number of episode, 'best' or 'last') from same experiments")
+    parser.add_argument("--checkpoint_path", type=str, default=None,
+                        help="path to pretrained model ")
+    parser.add_argument("--desc", type=str, default="",
+                        help="Additional description of the executing code")
     args = parser.parse_args()
 
     return args
@@ -36,11 +40,13 @@ def main():
                             logging.FileHandler(os.path.join(get_experiments_base_path(config), f"running_{'eval' if args.eval else 'train'}_log.log")),
                             logging.StreamHandler()
                         ])
+    logging.info(f"Description: {args.desc}")
 
     trainer = PPOAgent(config,
                        get_device())
-    if args.load_postfix:
-        trainer.load(args.load_postfix)
+    if args.load_postfix or args.checkpoint_path:
+        trainer.load(postfix=args.load_postfix,
+                     checkpoint_path=args.checkpoint_path)
 
     if args.train:
         trainer.step()

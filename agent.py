@@ -17,7 +17,11 @@ from torch.utils.tensorboard import SummaryWriter
 from env import TrainEnvironment
 from replay_buffer import PPOMemory
 from model import Actor, Critic, Discriminator
-from utils.general import set_seed, pretty_config, get_experiments_base_path
+from scheduler import WarmupLinearSchedule
+from utils.general import (
+    set_seed, get_rng_state, set_rng_state,
+    pretty_config, get_experiments_base_path
+)
 from utils.stuff import RewardScaler
 from utils.expert import get_expert_data
 
@@ -53,15 +57,13 @@ class PPOAgent:
             self.expert_data = get_expert_data(config)
 
         if self.config.train.scheduler:
-            self.scheduler  = torch.optim.lr_scheduler.LambdaLR(
-                optimizer=self.optimizer,
-                lr_lambda=lambda epoch: max(1.0 - float(epoch / self.config.train.max_episodes), 0)
-            )
+            self.scheduler = WarmupLinearSchedule(optimizer=self.optimizer,
+                                                  warmup_steps=0,#int(self.config.train.max_episodes * 0.1),
+                                                  max_steps=self.config.train.max_episodes)
             if 'gail' in self.config:
-                self.disc_scheduler  = torch.optim.lr_scheduler.LambdaLR(
-                    optimizer=self.disc_optimizer,
-                    lr_lambda=lambda epoch: max(1.0 - float(epoch / self.config.train.max_episodes), 0)
-                )
+                self.disc_scheduler = WarmupLinearSchedule(optimizer=self.disc_optimizer,
+                                                           warmup_steps=0, 
+                                                           max_steps=self.config.train.max_episodes)
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
             self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
@@ -72,7 +74,7 @@ class PPOAgent:
 
         self.writer = None
         self.memory = None
-        self.episode = 0
+        self.episode = 1
 
         logger.info("----------- Config -----------")
         pretty_config(config, logger=logger)
@@ -111,14 +113,25 @@ class PPOAgent:
             if 'gail' in self.config:
                 torch.save(self.disc_scheduler.state_dict(), os.path.join(ckpt_path, "disc_scheduler.pt"))
 
+        # save random state
+        torch.save(get_rng_state(), os.path.join(ckpt_path, 'rng_state.ckpt'))
+
         with open(os.path.join(ckpt_path, "appendix"), "w") as f:
             f.write(f"{self.episode}\n")
 
 
-    def load(self, postfix):
-        base_path = get_experiments_base_path(self.config)
+    def load(self, postfix=None, checkpoint_path=None):
+        assert postfix is not None or checkpoint_path is not None, ""
 
-        ckpt_path = os.path.join(base_path, "checkpoints", postfix)
+        if postfix is None:
+            ckpt_path = checkpoint_path
+        else:
+            base_path = get_experiments_base_path(self.config)
+
+            ckpt_path = os.path.join(base_path, "checkpoints", postfix)
+
+        logger.info(f"Load pretrained model from {ckpt_path}")
+
         self.actor.load_state_dict(torch.load(os.path.join(ckpt_path, "actor.pt")))
         self.critic.load_state_dict(torch.load(os.path.join(ckpt_path, "critic.pt")))
         self.optimizer.load_state_dict(torch.load(os.path.join(ckpt_path, "optimizer.pt")))
@@ -129,6 +142,14 @@ class PPOAgent:
             self.scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "scheduler.pt")))
             if 'gail' in self.config:
                 self.disc_scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "disc_scheduler.pt")))
+
+        # load random state
+        set_rng_state(torch.load(os.path.join(ckpt_path, 'rng_state.ckpt'), map_location='cpu'))
+
+        with open(os.path.join(ckpt_path, "appendix"), "r") as f:
+            lines = f.readlines()
+
+        self.episode = int(lines[0])
 
     def prepare_data(self, data):       
         s        = torch.cat(data['states'], dim=0).float()
@@ -165,37 +186,36 @@ class PPOAgent:
         learner_accuracies = []
         expert_accuracies = []
 
-        gail_batch_size = self.config.train.ppo.memory_size // self.config.train.gail.dstep
-
-        learner_iter = gail_iter(gail_batch_size, data[0:2])
-        expert_iter = gail_iter(gail_batch_size, self.expert_data)
+        learner_iter = gail_iter(self.config.train.gail.batch_size, data[0:2])
+        expert_iter = gail_iter(self.config.train.gail.batch_size, self.expert_data)
 
         self.disc.train()
-        for ob, ac in learner_iter:
-            expert_ob, expert_ac = next(expert_iter)
+        for _ in range(self.config.train.gail.epoch):
+            for ob, ac in learner_iter:
+                expert_ob, expert_ac = next(expert_iter)
 
-            learner_logit = self.disc(ob, ac)
-            learner_prob = torch.sigmoid(learner_logit)
+                learner_logit = self.disc(ob, ac)
+                learner_prob = torch.sigmoid(learner_logit)
 
-            expert_logit = self.disc(expert_ob, expert_ac)
-            expert_prob = torch.sigmoid(expert_logit)
+                expert_logit = self.disc(expert_ob, expert_ac)
+                expert_prob = torch.sigmoid(expert_logit)
 
-            learner_loss = loss_fn(learner_prob, torch.ones_like(learner_prob))
-            expert_loss = loss_fn(expert_prob, torch.zeros_like(expert_prob))
-        
-            # maximize E_learner [ log(D(s,a))] + E_expert [ log(1 - D(s,a))]
-            loss = learner_loss + expert_loss
-            discriminator_losses.append(loss.item())
+                learner_loss = loss_fn(learner_prob, torch.ones_like(learner_prob))
+                expert_loss = loss_fn(expert_prob, torch.zeros_like(expert_prob))
+            
+                # maximize E_learner [ log(D(s,a))] + E_expert [ log(1 - D(s,a))]
+                loss = learner_loss + expert_loss
+                discriminator_losses.append(loss.item())
 
-            self.disc_optimizer.zero_grad()
-            loss.backward()
-            self.disc_optimizer.step()
+                self.disc_optimizer.zero_grad()
+                loss.backward()
+                self.disc_optimizer.step()
 
-            learner_acc = ((learner_prob >= 0.5).float().mean().item())
-            expert_acc = ((expert_prob < 0.5).float().mean().item())
+                learner_acc = ((learner_prob >= 0.5).float().mean().item())
+                expert_acc = ((expert_prob < 0.5).float().mean().item())
 
-            learner_accuracies.append(learner_acc)
-            expert_accuracies.append(expert_acc)
+                learner_accuracies.append(learner_acc)
+                expert_accuracies.append(expert_acc)
 
         avg_d_loss = np.mean(discriminator_losses)
         avg_learner_accuracy = np.mean(learner_accuracies)
@@ -351,7 +371,7 @@ class PPOAgent:
 
         # -------- Training Loop --------
         
-        for episode in range(1, self.config.train.max_episodes + 1):
+        for episode in range(self.episode, self.config.train.max_episodes + 1):
             self.episode = episode
 
             # shape
@@ -460,14 +480,13 @@ class PPOAgent:
                 for idx, lr in enumerate(self.scheduler.get_lr()):
                     self.writer.add_scalar(f"train/learning_rate{idx}", lr, self.episode)
                 if 'gail' in self.config:
-                    self.disc_scheduler.step()
                     for idx, lr in enumerate(self.disc_scheduler.get_lr()):
                         self.writer.add_scalar(f"train/gail_learning_rate{idx}", lr, self.episode)
 
 
             # Printing for console
             if self.episode % self.config.train.log_interval == 0:
-                logger.info(f"[Info {datetime.now().replace(microsecond=0) - start_time}] {self.episode} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")
+                logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.episode} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")
 
             # Save best model
             if avg_score >= best_score and self.episode >= self.config.train.max_episodes * 0.1:
