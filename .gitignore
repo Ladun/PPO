@@ -5,6 +5,7 @@
 *__test__.*
 experiments/*
 experts/*
+checkpoints/*
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

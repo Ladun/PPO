@@ -2,6 +2,7 @@
 import os
 import random
 import logging
+import time
 from datetime import datetime
 import numpy as np
 
@@ -9,6 +10,20 @@ import omegaconf
 from omegaconf import OmegaConf
 
 import torch
+
+
+class Timer:
+    def __enter__(self):
+        self.start = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.end = time.time()
+        self.duration = self.end - self.start
+
+    def get(self):
+        return round(time.time() - self.start, 5)
+
 
 
 def get_cur_time_code():
@@ -35,34 +50,22 @@ def make_directory_and_get_path(dir_path, file_name=None, uniqueness=False):
     return path
 
 
-def get_config(yaml_file=None, yaml_string=None, exp_name=None, overwrite_exp=False, **kwargs):
-    assert yaml_file is not None or yaml_string is not None or len(kwargs.keys()) > 0
-    
+def get_config(yaml_file=None, yaml_string=None, **kwargs):
+    assert yaml_file is not None or yaml_string is not None, 'Must enter yaml_file or string'
+
     if yaml_string is not None:
         conf = OmegaConf.create(yaml_string)
-    elif yaml_file is None:
-        conf = OmegaConf.create(kwargs)
     else:
         conf = OmegaConf.load(yaml_file)
-    
-    # --- Create experiment name ---
-    if exp_name is None:    
-        exp_name = f"exp{get_cur_time_code()}"
 
-    # save old exp_name
-    if "exp_name" in conf:  
-        if overwrite_exp:
-            conf.old_exp_name = conf.exp_name
-            conf.exp_name = exp_name
-    else:
-        conf.exp_name = exp_name
-        
+    # Update additional options
+    if kwargs:
+        conf.update(kwargs)
+
+    if 'checkpoint_path' not in conf:
+        conf.checkpoint_path = '.'
+
     return conf
-
-
-def get_experiments_base_path(config):
-    return os.path.join(config.checkpoint_path, 'experiments', config.env.env_name, config.exp_name)
-
 
 def get_device(device=None):
     # --- Define torch device from config 'device'

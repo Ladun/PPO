@@ -3,27 +3,31 @@ import os
 import glob
 import numpy as np
 import logging
+import shutil
 from datetime import datetime
 from PIL import Image
 from collections import deque
 
 from omegaconf import OmegaConf
+import gymnasium as gym
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
-from env import TrainEnvironment
 from replay_buffer import PPOMemory
-from model import Actor, Critic, Discriminator
+from model import ActorCritic, Discriminator
 from scheduler import WarmupLinearSchedule
 from utils.general import (
     set_seed, get_rng_state, set_rng_state,
-    pretty_config, get_experiments_base_path
+    pretty_config, get_cur_time_code,
+    Timer
 )
 from utils.stuff import RewardScaler
 from utils.expert import get_expert_data
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -33,19 +37,16 @@ class PPOAgent:
 
         self.config = config
         self.device = device
-
-        set_seed(config.seed)
-
+        
+        rng_state, _ = gym.utils.seeding.np_random(self.config.seed)
+        self.env_rng_state = rng_state
+        
         # -------- Define models --------
-
-        self.actor      = Actor(config, device)
-        self.critic     = Critic(config)
-        self.optimizer  = torch.optim.Adam([
-            {'params': self.actor.parameters(),
-             **config.actor.optimizer},
-            {'params': self.critic.parameters(),
-             **config.critic.optimizer}
-        ])
+        self.network = ActorCritic(config, device).to(device)
+        self.optimizer = torch.optim.Adam(
+            self.network.parameters(),
+            **self.config.network.optimizer
+        )
 
         if 'gail' in self.config:
             self.disc = Discriminator(config)
@@ -59,11 +60,11 @@ class PPOAgent:
         if self.config.train.scheduler:
             self.scheduler = WarmupLinearSchedule(optimizer=self.optimizer,
                                                   warmup_steps=0,#int(self.config.train.max_episodes * 0.1),
-                                                  max_steps=self.config.train.max_episodes)
+                                                  max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len)
             if 'gail' in self.config:
                 self.disc_scheduler = WarmupLinearSchedule(optimizer=self.disc_optimizer,
                                                            warmup_steps=0, 
-                                                           max_steps=self.config.train.max_episodes)
+                                                           max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len)
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
             self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
@@ -74,13 +75,14 @@ class PPOAgent:
 
         self.writer = None
         self.memory = None
-        self.episode = 1
+        self.timesteps      = 0
+        self.trained_epoch  = 0
 
         logger.info("----------- Config -----------")
         pretty_config(config, logger=logger)
     
 
-    def save(self, postfix):
+    def save(self, postfix, envs=None):
         '''
         ckpt_root
             exp_name
@@ -91,19 +93,30 @@ class PPOAgent:
                     ...
                 
         '''
-        # saving things
-        #   actor, critic, optimizer
-        #   config file
-        base_path = get_experiments_base_path(self.config)
-        os.makedirs(base_path, exist_ok=True)
-        with open(os.path.join(base_path, "config.yaml"), 'w') as fp:
+
+        ckpt_path = os.path.join(self.config.experiment_path, "checkpoints")
+        if os.path.exists(ckpt_path):
+            # In order to save only the maximum number of checkpoints as max_save_store,
+            # checkpoints exceeding that number are deleted. (exclude 'best')
+            current_ckpt = [f for f in os.listdir(ckpt_path) if f.startswith('timesteps')]
+            current_ckpt.sort(key=lambda x: int(x[9:]))
+            # Delete exceeded checkpoints
+            if self.config.train.max_ckpt_count > 0 and self.config.train.max_ckpt_count <= len(current_ckpt):
+                for ckpt in current_ckpt[:len(current_ckpt) - self.config.train.max_ckpt_count - 1]:
+                    shutil.rmtree(os.path.join(self.config.experiment_path, "checkpoints", ckpt), ignore_errors=True)
+
+
+        # Save configuration file
+        os.makedirs(self.config.experiment_path, exist_ok=True)
+        with open(os.path.join(self.config.experiment_path, "config.yaml"), 'w') as fp:
             OmegaConf.save(config=self.config, f=fp)
 
-        # save model and optimizers
-        ckpt_path = os.path.join(base_path, "checkpoints", postfix)
+        # postfix is ​​a variable for storing each episode or the best model
+        ckpt_path = os.path.join(ckpt_path, postfix)
         os.makedirs(ckpt_path, exist_ok=True)
-        torch.save(self.actor.state_dict(), os.path.join(ckpt_path, "actor.pt"))
-        torch.save(self.critic.state_dict(), os.path.join(ckpt_path, "critic.pt"))
+        
+        # save model and optimizers
+        torch.save(self.network.state_dict(), os.path.join(ckpt_path, "network.pt"))
         torch.save(self.optimizer.state_dict(), os.path.join(ckpt_path, "optimizer.pt"))
         if 'gail' in self.config:
             torch.save(self.disc.state_dict(), os.path.join(ckpt_path, "discriminator.pt"))
@@ -115,33 +128,32 @@ class PPOAgent:
 
         # save random state
         torch.save(get_rng_state(), os.path.join(ckpt_path, 'rng_state.ckpt'))
+        if envs:
+            torch.save(envs.np_random, os.path.join(ckpt_path, 'env_rng_state.ckpt'))
 
         with open(os.path.join(ckpt_path, "appendix"), "w") as f:
-            f.write(f"{self.episode}\n")
+            f.write(f"{self.timesteps}\n")
+            f.write(f"{self.trained_epoch}\n")
 
+    @classmethod
+    def load(cls, experiment_path, postfix, resume=True):
 
-    def load(self, postfix=None, checkpoint_path=None):
-        assert postfix is not None or checkpoint_path is not None, ""
+        config = get_config(os.path.join(experiment_path, "config.yaml"))
+        ppo_algo = PPOAlgo(config, get_device(config.device))
+        
+        # Create a variable to indicate which path the model will be read from
+        ckpt_path = os.path.join(experiment_path, "checkpoints", postfix)
+        print(f"Load pretrained model from {ckpt_path}")
 
-        if postfix is None:
-            ckpt_path = checkpoint_path
-        else:
-            base_path = get_experiments_base_path(self.config)
-
-            ckpt_path = os.path.join(base_path, "checkpoints", postfix)
-
-        logger.info(f"Load pretrained model from {ckpt_path}")
-
-        self.actor.load_state_dict(torch.load(os.path.join(ckpt_path, "actor.pt")))
-        self.critic.load_state_dict(torch.load(os.path.join(ckpt_path, "critic.pt")))
-        self.optimizer.load_state_dict(torch.load(os.path.join(ckpt_path, "optimizer.pt")))
-        if 'gail' in self.config:
-            self.disc.load_state_dict(torch.load(os.path.join(ckpt_path, "discriminator.pt")))
-            self.disc_optimizer.load_state_dict(torch.load(os.path.join(ckpt_path, "disc_optimizer.pt")))
-        if self.config.train.scheduler:
-            self.scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "scheduler.pt")))
-            if 'gail' in self.config:
-                self.disc_scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "disc_scheduler.pt")))
+        ppo_algo.network.load_state_dict(torch.load(os.path.join(ckpt_path, "network.pt")))
+        ppo_algo.optimizer.load_state_dict(torch.load(os.path.join(ckpt_path, "optimizer.pt")))
+        if 'gail' in ppo_algo.config:
+            ppo_algo.disc.load_state_dict(torch.load(os.path.join(ckpt_path, "discriminator.pt")))
+            ppo_algo.disc_optimizer.load_state_dict(torch.load(os.path.join(ckpt_path, "disc_optimizer.pt")))
+        if ppo_algo.config.train.scheduler:
+            ppo_algo.scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "scheduler.pt")))
+            if 'gail' in ppo_algo.config:
+                ppo_algo.disc_scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "disc_scheduler.pt")))
 
         # load random state
         set_rng_state(torch.load(os.path.join(ckpt_path, 'rng_state.ckpt'), map_location='cpu'))
@@ -149,20 +161,26 @@ class PPOAgent:
         with open(os.path.join(ckpt_path, "appendix"), "r") as f:
             lines = f.readlines()
 
-        self.episode = int(lines[0])
+        if resume:
+            ppo_algo.timesteps = int(lines[0])
+            ppo_algo.trained_epoch = int(lines[1])
+            if os.path.exist(os.path.join(ckpt_path, 'env_rng_state.ckpt')):
+                self.env_rng_state = torch.load(os.path.join(ckpt_path, 'env_rng_state.ckpt'), map_location='cpu')
+
+        return ppo_algo
 
     def prepare_data(self, data):       
-        s        = torch.cat(data['states'], dim=0).float()
-        a        = torch.cat(data['actions'], dim=0)
-        logp     = torch.tensor(data['logpas']).float()
-        tdlamret = torch.tensor(data['tdlamret']).float()
-        adv      = torch.tensor(data['advants']).float()
-        v        = torch.tensor(data['values']).float()
+        s        = data['state'].float()
+        a        = data['action']
+        logp     = data['logprob'].float()
+        v_target = data['v_target'].float()
+        adv      = data['advant'].float()
+        v        = data['value'].float()
 
         # normalize advant a.k.a atarg
         adv = (adv - adv.mean()) / (adv.std() + 1e-5)
 
-        return s, a, logp, adv, tdlamret, v
+        return s, a, logp, adv, v_target, v
 
     def optimize_gail(self, data):
 
@@ -250,8 +268,7 @@ class PPOAgent:
 
         # -------- PPO Training Loop --------
 
-        self.actor.train()
-        self.critic.train()
+        self.network.train()
         for _ in range(self.config.train.ppo.optim_epochs):
             data_loader = ppo_iter(self.config.train.ppo.batch_size, data)
 
@@ -261,7 +278,8 @@ class PPOAgent:
                 # -------- Loss calculate --------
 
                 # --- policy loss
-                _, cur_logp, cur_ent = self.actor(ob, action=ac)
+                _, cur_logp, cur_ent, cur_v = self.network(ob, action=ac)
+                cur_v = cur_v.reshape(-1)
                 ratio = torch.exp(cur_logp - old_logp)
                 surr1 = ratio * adv
 
@@ -282,8 +300,6 @@ class PPOAgent:
                 policy_surr = -policy_surr.mean()
 
                 # --- value loss
-                cur_v = self.critic(ob)
-                cur_v = cur_v.reshape(-1)
 
                 if self.config.train.ppo.value_clipping:
                     cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
@@ -309,7 +325,7 @@ class PPOAgent:
                 total_loss.backward()
 
                 if self.config.train.clipping_gradient:
-                    nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+                    nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
 
                 self.optimizer.step()
 
@@ -323,14 +339,15 @@ class PPOAgent:
             avg_value_loss = np.mean(value_losses)
             avg_total_loss = np.mean(total_losses)
 
-            self.writer.add_scalar("train/policy_loss", avg_policy_loss, self.episode)
-            self.writer.add_scalar("train/entropy_loss", avg_entropy_loss, self.episode)
-            self.writer.add_scalar("train/value_loss", avg_value_loss, self.episode)
-            self.writer.add_scalar("train/total_loss", avg_total_loss, self.episode)                 
+            self.writer.add_scalar("train/policy_loss", avg_policy_loss, self.trained_epoch)
+            self.writer.add_scalar("train/entropy_loss", avg_entropy_loss, self.trained_epoch)
+            self.writer.add_scalar("train/value_loss", avg_value_loss, self.trained_epoch)
+            self.writer.add_scalar("train/total_loss", avg_total_loss, self.trained_epoch)                 
 
+            self.trained_epoch += 1
 
-    def optimize(self):
-        data = self.prepare_data(self.memory.get())
+    def optimize(self, data):
+        data = self.prepare_data(data)
 
         if 'gail' in self.config:
             self.optimize_gail(data)
@@ -338,125 +355,141 @@ class PPOAgent:
         self.optimize_ppo(data)
 
 
-    def step(self):
+    def step(self, envs, exp_name=None):
+
+        # Set random state for reproducibility
+        envs.np_random = self.env_rng_state        
 
         # -------- Initialize --------
 
         start_time = datetime.now().replace(microsecond=0)
+        
+        # Create an experiment directory to record training data
+        self.config.experiment_name = f"exp{get_cur_time_code()}" if exp_name is None else exp_name
+        self.config.experiment_path = os.path.join(self.config.checkpoint_path, self.config.experiment_name)
+        os.makedirs(self.config.experiment_path, exist_ok=True)
+        logger.addHandler( logging.FileHandler(os.path.join(self.config.experiment_path, f"running_train_log.log")))
 
         # For logging training state
-        writer_path     = os.path.join(get_experiments_base_path(self.config), 'runs')
+        writer_path     = os.path.join( self.config.experiment_path, 'runs')
         self.writer     = SummaryWriter(writer_path)
-        # log data store queue
-        score_queue     = deque(maxlen=self.config.train.average_interval)
-        length_queue    = deque(maxlen=self.config.train.average_interval)
+        # Queue to record learning data,
+        # [0] is a value to prevent errors caused by missing data.
+        reward_queue    = deque([0], maxlen=self.config.train.average_interval)
+        duration_queue  = deque([0], maxlen=self.config.train.average_interval)
         if 'gail' in self.config:
-            irl_score_queue = deque(maxlen=self.config.train.average_interval)
+            irl_score_queue = deque([0], maxlen=self.config.train.average_interval)
 
-        best_score = 0
-
-        # init env  
-        env = TrainEnvironment(
-            env_name=self.config.env.env_name,
-            is_continuous=self.config.env.is_continuous,
-            seed=self.config.seed
-        )
-        env.init()
+        episodic_reward = np.zeros(len(envs))
+        duration = np.zeros(len(envs))
+        if 'gail' in self.config:
+            irl_episodic_reward = np.zeros(len(envs))
+        best_score = -1e9
 
         # make rollout buffer
         self.memory = PPOMemory(
             gamma=self.config.train.gamma,
-            tau=self.config.train.tau
+            tau=self.config.train.tau,
+            device=self.device
         )
+        
+        # For logging
+        traj_collect_time = 0
+        optimize_time = 0        
+
+        '''
+        Environment symbol's information
+        ===========  ==========================  ==================
+        Symbol       Shape                       Type
+        ===========  ==========================  ==================
+        state        (num_envs, (obs_space))     numpy.ndarray
+        reward       (num_envs,)                 numpy.ndarray
+        term         (num_envs,)                 numpy.ndarray
+        done         (num_envs,)                 numpy.ndarray
+        ===========  ==========================  ==================
+        '''
+        state, info  = envs.reset()
+        done = np.zeros(len(envs))
 
         # -------- Training Loop --------
         
-        for episode in range(self.episode, self.config.train.max_episodes + 1):
-            self.episode = episode
+        print(f"================ Start training ================")
+        print(f"========= Exp name: {self.config.experiment_name} ==========")
+        while self.timesteps < self.config.train.total_timesteps + 1:
 
-            # shape
-            # state: (obserbation_size, )
-            episode_score = 0
-            duration = 0
-            if 'gail' in self.config:
-                irl_episode_score = 0
+            with Timer() as timer:
+                for t in range(0, self.config.train.max_episode_len ):
 
-            state, _ = env.reset()
+                    # ------------- Collect Trajectories -------------
 
-            for t in range(1, self.config.train.max_episode_len + 1):
-
-                # ------------- Collect Trajectories -------------
-
-                # step action
-                # discrete: 
-                #   state         , action, logprobs, ent
-                #   (1, state_dim),   (1,),     (1,), (1,)
-                with torch.no_grad():
-                    state = torch.tensor(state).unsqueeze(0).float()
-                    action, logprobs, _ = self.actor(state)
-                    values = self.critic(state).squeeze(1)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-
-                # update episode_score
-                episode_score += reward
-                duration += 1
-
-                if 'gail' in self.config:
+                    '''
+                    Actor-Critic symbol's information
+                    ===========  ==========================  ==================
+                    Symbol       Shape                       Type
+                    ===========  ==========================  ==================
+                    action       (num_envs,)                 torch.Tensor
+                    logprobs     (num_envs,)                 torch.Tensor
+                    ent          (num_envs,)                 torch.Tensor
+                    values       (num_envs, 1)               torch.Tensor
+                    ===========  ==========================  ==================
+                    '''
                     with torch.no_grad():
-                        reward = self.disc.get_irl_reward(state, action).detach().item()
-                        irl_episode_score += reward
+                        action, logprobs, _, values = self.network(torch.from_numpy(state).to(self.device, dtype=torch.float))
+                        values = values.flatten() # reshape shape of the value to (num_envs,)
+                    next_state, reward, terminated, truncated, _ = envs.step(action.cpu().numpy())
+                    self.timesteps += len(envs)
 
-                if self.config.train.reward_scaler:
-                    reward = self.reward_scaler(reward, update=True)
-                    
-                # add experience to the memory
-                self.memory.store(
-                    s=state,
-                    a=action,
-                    r=reward,
-                    v=values.item(),
-                    lp=logprobs.item()
-                )
-                
-                # ------------- Checking for optimize -------------
-                
-                # done or timeout or memory full
-                # done => v = 0
-                # timeout or memory full => v = critic(next_state)
-                # update gae & return in the memory!!
-                timeout = t == self.config.train.max_episode_len
-                time_to_optimize = len(self.memory) == self.config.train.ppo.memory_size
-                if done or timeout or time_to_optimize:
-                    if done:
-                        # cuz the game is over, value of the next state is 0
-                        v = 0
-                    else:
-                        # if not, estimate it with the critic
-                        next_state_tensor = torch.tensor(next_state).unsqueeze(0).float() # bsz = 1
-                        with torch.no_grad():
-                            next_value_tensor = self.critic(next_state_tensor).squeeze(1)
-                        v = next_value_tensor.item()
+                    # update episodic_reward
+                    episodic_reward += reward
+                    duration += 1
 
-                    # update gae & tdlamret
-                    self.memory.finish_path(v)
-                    
-                # if memory is full, optimize PPO
-                if time_to_optimize:
-                    self.optimize()
-
-                if done:
-                    score_queue.append(episode_score)
-                    length_queue.append(duration)
                     if 'gail' in self.config:
-                        irl_score_queue.append(irl_episode_score)
-                    episode_score = 0
-                    duration = 0
-                    state, _ = env.reset()
-                    continue
+                        with torch.no_grad():
+                            reward = self.disc.get_irl_reward(state, action).cpu().detach().numpy()
+                            irl_episodic_reward += reward
+
+                    if self.config.train.reward_scaler:
+                        reward = self.reward_scaler(reward, update=True)
+                        
+                    # add experience to the memory                    
+                    self.memory.store(
+                        state=state,
+                        action=action,
+                        reward=reward,
+                        done=done,
+                        value=values,
+                        logprob=logprobs
+                    )
+                    done = terminated + truncated
+
+                    for idx, d in enumerate(done):
+                        if d:
+                            reward_queue.append(episodic_reward[idx])
+                            duration_queue.append(duration[idx])                            
+                            if 'gail' in self.config:
+                                irl_score_queue.append(irl_episodic_reward[idx])
+
+                            episodic_reward[idx] = 0
+                            duration[idx] = 0                    
+                            if 'gail' in self.config:
+                                irl_score_queue[idx] = 0
+                    
+                    # update state
+                    state = next_state
+                traj_collect_time = timer.get()
                 
-                # update state
-                state = next_state
+            # ------------- Calculate gae for optimizing-------------
+
+            # Estimate next state value for gae
+            with torch.no_grad():
+                _, _, _, next_value = self.network(torch.Tensor(next_state).to(self.device))
+                next_value = next_value.flatten()
+
+            # update gae & tdlamret
+            # Optimize
+            with Timer() as timer:
+                self.optimize(self.memory.compute_gae_and_get(next_value, done))
+                optimize_time = timer.get()
 
             # scheduling learning rate
             if self.config.train.scheduler:
@@ -466,122 +499,74 @@ class PPOAgent:
 
             # ------------- Logging training state -------------
 
-            avg_score       = np.mean(score_queue)
-            std_score       = np.std(score_queue)
-            avg_duration    = np.mean(length_queue)
+            avg_score       = np.round(np.mean(reward_queue), 4)
+            std_score       = np.round(np.std(reward_queue), 4)
+            avg_duration    = np.round(np.mean(duration_queue), 4)
 
             # Writting for tensorboard
-            self.writer.add_scalar("train/score", avg_score, self.episode)
-            self.writer.add_scalar("train/duration", avg_duration, self.episode)
+            self.writer.add_scalar("train/score", avg_score, self.timesteps)
+            self.writer.add_scalar("train/duration", avg_duration, self.timesteps)
             if 'gail' in self.config:
                 avg_irl_score = np.mean(irl_score_queue)
-                self.writer.add_scalar("train/irl_score", avg_irl_score, self.episode)
+                self.writer.add_scalar("train/irl_score", avg_irl_score, self.timesteps)
             if self.config.train.scheduler:
                 for idx, lr in enumerate(self.scheduler.get_lr()):
-                    self.writer.add_scalar(f"train/learning_rate{idx}", lr, self.episode)
+                    self.writer.add_scalar(f"train/learning_rate{idx}", lr, self.timesteps)
                 if 'gail' in self.config:
                     for idx, lr in enumerate(self.disc_scheduler.get_lr()):
-                        self.writer.add_scalar(f"train/gail_learning_rate{idx}", lr, self.episode)
-
+                        self.writer.add_scalar(f"train/gail_learning_rate{idx}", lr, self.timesteps)
 
             # Printing for console
-            if self.episode % self.config.train.log_interval == 0:
-                logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.episode} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")
+            logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.timesteps} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")
+            logger.info(f"\t\t trajectory collection time: {traj_collect_time} \t optimize time: {optimize_time}")
 
             # Save best model
-            if avg_score >= best_score and self.episode >= self.config.train.max_episodes * 0.1:
-                # logger.info(f"[Info] found best model at episode: {self.episode}")
-                self.save(f'best')
+            if avg_score >= best_score:
+                self.save(f'best', envs)
                 best_score = avg_score
 
-            if self.episode % self.config.train.save_interval == 0:
-                self.save(str(self.episode))
+            self.save(f"timesteps{self.timesteps}", envs)
 
-        env.close()
+        envs.close()
         self.save('last')
         return best_score
 
-
-    def make_gif_from_images(self, total_timesteps = 500, step = 2, frame_duration = 100):
-
-        # Make gif directories
-        gif_path = os.path.join(get_experiments_base_path(self.config), "gif_path")
-        os.makedirs(gif_path, exist_ok=True)        
-        gif_path = gif_path + "/gif.gif"
-        
-        image_path = os.path.join(get_experiments_base_path(self.config), "render_images")
-        image_path = image_path + '/*.jpg'
-
-        # Get images
-        img_paths = sorted(glob.glob(image_path))
-        img_paths = img_paths[:total_timesteps]
-        img_paths = img_paths[::step]
-        
-        logger.info(f"total frames in gif : {len(img_paths)}")
-        logger.info(f"total duration of gif : {str(round(len(img_paths) * frame_duration / 1000, 2))} seconds")
-            
-        # save gif
-        img, *imgs = [Image.open(f) for f in img_paths]
-        img.save(fp=gif_path, format='GIF', append_images=imgs, save_all=True, optimize=True, duration=frame_duration, loop=0)
-
     
-    def play(self, num_episodes=1, max_ep_len=100, use_rendering=False):  
+    def play(self, env, max_ep_len, num_episodes=10):  
 
-        if use_rendering:
-            image_path = os.path.join(get_experiments_base_path(self.config), "render_images")
-            os.makedirs(image_path, exist_ok=True)
-            
-        env = TrainEnvironment(
-            env_name=self.config.env.env_name,
-            is_continuous=self.config.env.is_continuous,
-            seed=self.config.seed
-        )
-        env.init(render_mode='rgb_array')
-
-        scores = []
+        rewards = []
         durations = []
 
         for episode in range(num_episodes):
 
-            episode_score = 0
-
-            # shape
-            # state: (obserbation_size, )
+            episodic_reward = 0
+            duration = 0
             state, _ = env.reset()
 
-            for t in range(1, max_ep_len + 1):
-                
+            for t in range(max_ep_len):
+
+                # ------------- Collect Trajectories -------------
+
                 with torch.no_grad():
-                    state = torch.tensor(state).unsqueeze(0).float()
-                    action, _, _ = self.actor(state)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
+                    action, _, _, _ = self.network(torch.Tensor(state).unsqueeze(0).to(self.device))
+                next_state, reward, terminated, truncated, info = env.step(action.cpu().numpy().item())
+                done = terminated + truncated
 
-                # update episode_score
-                episode_score += reward   
+                episodic_reward += reward
+                duration += 1
 
-                # rendering 
-                if use_rendering and episode == num_episodes - 1:
-                    # render
-                    img = Image.fromarray(env.env.render())
-                    # save
-                    img.save(image_path + '/' + str(t).zfill(6) + '.jpg')             
+                if done:
+                    break
 
                 # update state
                 state = next_state
 
-                # game over condition
-                if done:
-                    break
+            rewards.append(episodic_reward)
+            durations.append(duration)
+            logger.info(f"Episode {episode}: score - {episodic_reward} duration - {t}")
 
-            scores.append(episode_score)
-            durations.append(t)
-            logger.info(f"Episode {episode}: score - {episode_score} duration - {t}")
-
-        avg_score = np.mean(scores)
+        avg_reward = np.mean(rewards)
         avg_duration = np.mean(durations)
-        logger.info(f"Average score {avg_score}, duration {avg_duration} on {num_episodes} games")               
+        logger.info(f"Average score {avg_reward}, duration {avg_duration} on {num_episodes} games")               
         env.close()
 
-        if use_rendering:
-            self.make_gif_from_images()

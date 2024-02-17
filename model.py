@@ -7,34 +7,7 @@ from torch.distributions import MultivariateNormal
 from torch.distributions import Categorical
 
 
-def get_model(model_info, **kwargs):
-    # Make the model based on the value written in config.
-
-    def get_value(tmp):
-        if isinstance(tmp, omegaconf.listconfig.ListConfig):
-            return sum([get_value(_tmp) for _tmp in tmp])
-        if isinstance(tmp, str):
-            return kwargs[tmp]
-        
-        return tmp
-
-    # Function body
-    model = []  
-    for _, info in enumerate(model_info):
-        # Module name
-        m = info[0] 
-        # Convert str value to value defined in kwargs
-        v = [get_value(t) for t in info[1]]
-        # index for where to use the value
-        # idx = info[1]
-
-        model.append(eval(m)(*v))
-
-    return nn.Sequential(*model)
-
-
-
-class Actor(nn.Module):
+class ActorCritic(nn.Module):
     def __init__(self, config, device):
         super().__init__()
 
@@ -42,26 +15,43 @@ class Actor(nn.Module):
 
         self.is_cont    = config.env.is_continuous
         self.device     = device
-
-        # -------- Define models --------
+        self.shared_layer = config.network.shared_layer
 
         if self.is_cont:
             # if action space is defined as continuous, make variance
             self.action_dim = config.env.action_dim
-            self.action_var = torch.full((self.action_dim, ), config.actor.action_std_init ** 2).to(self.device)
+            self.action_var = torch.full((self.action_dim, ), config.network.action_std_init ** 2).to(self.device)
 
-        self.m = get_model(
-            config.actor.arch,
-            state_dim=config.env.state_dim,
-            action_dim=config.env.action_dim
-        )
+        if config.network.shared_layer:
+            self.shared_net = nn.Sequential(
+                nn.Linear(config.env.state_dim, 64),
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh()
+            )
+            self.actor = nn.Sequential(
+                nn.Linear(64, config.env.action_dim),
+                nn.Tanh()
+            )
+            self.critic = nn.Linear(64, 1)
 
-        # -------- warning --------
+        else:
+            self.actor = nn.Sequential(
+                nn.Linear(config.env.state_dim, 64),
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh(),
+                nn.Linear(64, config.env.action_dim),
+                nn.Tanh()
+            )
+            self.critic = nn.Sequential(
+                nn.Linear(config.env.state_dim, 64),
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1)
+            )
 
-        if self.is_cont:
-            if isinstance(self.m[-1], nn.Softmax):
-                print("[Warning] action is continuous space but model output layer is softmax")
-    
 
     def set_action_std(self, std):
         # Change the action variance
@@ -73,15 +63,18 @@ class Actor(nn.Module):
 
 
     def forward(self, state, action=None):
+        if self.shared_layer:
+            state = self.shared_net(state)
+
         if self.is_cont:
             # continuous space action 
-            action_mean = self.m(state)
+            action_mean = self.actor(state)
             action_var = self.action_var.expand_as(action_mean)
             cov_mat = torch.diag_embed(action_var).to(self.device)
             dist = MultivariateNormal(action_mean, cov_mat)
         else:
             # discrete space action
-            action_probs = self.m(state)
+            action_probs = self.actor(state)
             dist = Categorical(action_probs)
 
         # Get (action, action's log probs, estimated Value)
@@ -89,22 +82,7 @@ class Actor(nn.Module):
             action = dist.sample()
         action_logprob = dist.log_prob(action)
 
-        return action, action_logprob, dist.entropy()
-    
-
-class Critic(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
-        # -------- Define models --------
-
-        self.m = get_model(
-            config.critic.arch,
-            state_dim=config.env.state_dim
-        )
-
-    def forward(self, inp):
-        return self.m(inp)
+        return action, action_logprob, dist.entropy(), self.critic(state)
 
 
 class Discriminator(nn.Module):
@@ -114,10 +92,13 @@ class Discriminator(nn.Module):
         self.is_cont    = config.env.is_continuous
         self.action_dim = config.env.action_dim
 
-        self.m = get_model(
-            config.gail.arch,
-            state_dim=config.env.state_dim,
-            action_dim=config.env.action_dim
+        hidden_dim = config.hidden_dim
+        self.m = nn.Sequential(
+            nn.Linear(config.state_dim + config.action_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, state, action):

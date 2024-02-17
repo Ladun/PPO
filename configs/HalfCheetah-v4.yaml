@@ -33,7 +33,7 @@ critic:
         betas: [0.9, 0.999]
         eps: 1e-5
 train: 
-    max_episodes: 2000
+    total_timesteps: 2000
     max_episode_len: 1024
     gamma: 0.99
     tau: 0.95

@@ -6,48 +6,21 @@ env:
     state_dim: 27
     action_dim: 8
 checkpoint_path: "."
-actor: 
-    action_std_init: 0.1
-    arch: [
-        [nn.Linear, [state_dim, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, action_dim]],
-        [nn.Tanh, []]
-    ]
+network:
+    shared_layer: False
     optimizer:
         lr: 1e-4
         betas: [0.9, 0.999]
         eps: 1e-5
-critic: 
-    arch: [
-        [nn.Linear, [state_dim, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, 1]]
-    ]
-    optimizer:
-        lr: 1e-4
-        betas: [0.9, 0.999]
-        eps: 1e-5  
-        weight_decay: 1e-3
 gail:
     expert_dir: 'experts/Ant-v4'
-    arch: [
-        [nn.Linear, [[state_dim, action_dim], 100]],
-        [nn.Tanh, []],
-        [nn.Linear, [100, 100]],
-        [nn.Tanh, []],
-        [nn.Linear, [100, 1]]
-    ]
+    hidden_dim: 100
     optimizer:
         lr: 1e-4
         betas: [0.9, 0.999]
         eps: 1e-5  
 train: 
-    max_episodes: 1500
+    total_timesteps: 1500
     max_episode_len: 2048
     gamma: 0.99
     tau: 0.95
