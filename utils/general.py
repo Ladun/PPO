@@ -13,6 +13,11 @@ import torch
 
 
 class Timer:
+    def __init__(self):
+        self.start = 0
+        self.end = 0
+        self.duration = 0
+
     def __enter__(self):
         self.start = time.time()
         return self
@@ -22,8 +27,19 @@ class Timer:
         self.duration = self.end - self.start
 
     def get(self):
-        return round(time.time() - self.start, 5)
+        return round(self.duration, 5)
 
+
+class TimerManager:
+    def __init__(self):
+        self.timers = {}
+
+    def get_timer(self, name):
+        if name in self.timers:
+            return self.timers[name]
+        else:
+            self.timers[name] = Timer()
+            return self.timers[name]
 
 
 def get_cur_time_code():

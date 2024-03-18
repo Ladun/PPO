@@ -4,6 +4,7 @@ import glob
 import numpy as np
 import logging
 import shutil
+import math
 from datetime import datetime
 from PIL import Image
 from collections import deque
@@ -22,7 +23,7 @@ from scheduler import WarmupLinearSchedule
 from utils.general import (
     set_seed, get_rng_state, set_rng_state,
     pretty_config, get_cur_time_code,
-    Timer
+    TimerManager
 )
 from utils.stuff import RewardScaler
 from utils.expert import get_expert_data
@@ -73,6 +74,7 @@ class PPOAgent:
         # if self.config.train_observation_scaler:
         #     self.obs_scaler = ObservationScaler()
 
+        self.timer_manager = TimerManager()
         self.writer = None
         self.memory = None
         self.timesteps      = 0
@@ -392,10 +394,7 @@ class PPOAgent:
             tau=self.config.train.tau,
             device=self.device
         )
-        
-        # For logging
-        traj_collect_time = 0
-        optimize_time = 0        
+          
 
         '''
         Environment symbol's information
@@ -417,85 +416,86 @@ class PPOAgent:
         print(f"========= Exp name: {self.config.experiment_name} ==========")
         while self.timesteps < self.config.train.total_timesteps + 1:
 
-            with Timer() as timer:
-                for t in range(0, self.config.train.max_episode_len ):
+            with self.timer_manager.get_timer("Total"):
+                with self.timer_manager.get_timer("Collect Trajectory"):
+                    for t in range(0, self.config.train.max_episode_len ):
 
-                    # ------------- Collect Trajectories -------------
+                        # ------------- Collect Trajectories -------------
 
-                    '''
-                    Actor-Critic symbol's information
-                    ===========  ==========================  ==================
-                    Symbol       Shape                       Type
-                    ===========  ==========================  ==================
-                    action       (num_envs,)                 torch.Tensor
-                    logprobs     (num_envs,)                 torch.Tensor
-                    ent          (num_envs,)                 torch.Tensor
-                    values       (num_envs, 1)               torch.Tensor
-                    ===========  ==========================  ==================
-                    '''
-                    with torch.no_grad():
-                        action, logprobs, _, values = self.network(torch.from_numpy(state).to(self.device, dtype=torch.float))
-                        values = values.flatten() # reshape shape of the value to (num_envs,)
-                    next_state, reward, terminated, truncated, _ = envs.step(action.cpu().numpy())
-                    self.timesteps += len(envs)
-
-                    # update episodic_reward
-                    episodic_reward += reward
-                    duration += 1
-
-                    if 'gail' in self.config:
+                        '''
+                        Actor-Critic symbol's information
+                        ===========  ==========================  ==================
+                        Symbol       Shape                       Type
+                        ===========  ==========================  ==================
+                        action       (num_envs,)                 torch.Tensor
+                        logprobs     (num_envs,)                 torch.Tensor
+                        ent          (num_envs,)                 torch.Tensor
+                        values       (num_envs, 1)               torch.Tensor
+                        ===========  ==========================  ==================
+                        '''
                         with torch.no_grad():
-                            reward = self.disc.get_irl_reward(state, action).cpu().detach().numpy()
-                            irl_episodic_reward += reward
+                            action, logprobs, _, values = self.network(torch.from_numpy(state).to(self.device, dtype=torch.float))
+                            values = values.flatten() # reshape shape of the value to (num_envs,)
+                        next_state, reward, terminated, truncated, _ = envs.step(action.cpu().numpy())
+                        self.timesteps += len(envs)
 
-                    if self.config.train.reward_scaler:
-                        reward = self.reward_scaler(reward, update=True)
+                        # update episodic_reward
+                        episodic_reward += reward
+                        duration += 1
+
+                        if 'gail' in self.config:
+                            with torch.no_grad():
+                                reward = self.disc.get_irl_reward(state, action).cpu().detach().numpy()
+                                irl_episodic_reward += reward
+
+                        if self.config.train.reward_scaler:
+                            reward = self.reward_scaler(reward, update=True)
+                            
+                        # add experience to the memory                    
+                        self.memory.store(
+                            state=state,
+                            action=action,
+                            reward=reward,
+                            done=done,
+                            value=values,
+                            logprob=logprobs
+                        )
+                        done = terminated + truncated
+
+                        for idx, d in enumerate(done):
+                            if d:
+                                reward_queue.append(episodic_reward[idx])
+                                duration_queue.append(duration[idx])                            
+                                if 'gail' in self.config:
+                                    irl_score_queue.append(irl_episodic_reward[idx])
+
+                                episodic_reward[idx] = 0
+                                duration[idx] = 0                    
+                                if 'gail' in self.config:
+                                    irl_score_queue[idx] = 0
                         
-                    # add experience to the memory                    
-                    self.memory.store(
-                        state=state,
-                        action=action,
-                        reward=reward,
-                        done=done,
-                        value=values,
-                        logprob=logprobs
-                    )
-                    done = terminated + truncated
-
-                    for idx, d in enumerate(done):
-                        if d:
-                            reward_queue.append(episodic_reward[idx])
-                            duration_queue.append(duration[idx])                            
-                            if 'gail' in self.config:
-                                irl_score_queue.append(irl_episodic_reward[idx])
-
-                            episodic_reward[idx] = 0
-                            duration[idx] = 0                    
-                            if 'gail' in self.config:
-                                irl_score_queue[idx] = 0
+                        # update state
+                        state = next_state
                     
-                    # update state
-                    state = next_state
-                traj_collect_time = timer.get()
-                
-            # ------------- Calculate gae for optimizing-------------
+                # ------------- Calculate gae for optimizing-------------
 
-            # Estimate next state value for gae
-            with torch.no_grad():
-                _, _, _, next_value = self.network(torch.Tensor(next_state).to(self.device))
-                next_value = next_value.flatten()
+                # Estimate next state value for gae
+                with torch.no_grad():
+                    _, _, _, next_value = self.network(torch.Tensor(next_state).to(self.device))
+                    next_value = next_value.flatten()
 
-            # update gae & tdlamret
-            # Optimize
-            with Timer() as timer:
-                self.optimize(self.memory.compute_gae_and_get(next_value, done))
-                optimize_time = timer.get()
+                # update gae & tdlamret
+                # Optimize
+                with self.timer_manager.get_timer("Optimize"):
+                    with self.timer_manager.get_timer("Calculate gae"):
+                        data = self.memory.compute_gae_and_get(next_value, done)
+                    self.optimize(data)
 
-            # scheduling learning rate
-            if self.config.train.scheduler:
-                self.scheduler.step()
-                if 'gail' in self.config:
-                    self.disc_scheduler.step()
+                # scheduling learning rate
+                if self.config.train.scheduler:
+                    self.scheduler.step()
+                    if 'gail' in self.config:
+                        self.disc_scheduler.step()
 
             # ------------- Logging training state -------------
 
@@ -517,8 +517,14 @@ class PPOAgent:
                         self.writer.add_scalar(f"train/gail_learning_rate{idx}", lr, self.timesteps)
 
             # Printing for console
-            logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.timesteps} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")
-            logger.info(f"\t\t trajectory collection time: {traj_collect_time} \t optimize time: {optimize_time}")
+            remaining_num_of_optimize = int(math.ceil((self.config.train.total_timesteps - self.timesteps) /
+                                                      (self.config.env.num_envs * self.config.train.max_episode_len)))
+            remaining_training_time_min = int(self.timer_manager.get_timer('Total').get() * remaining_num_of_optimize // 60)
+            remaining_training_time_sec = int(self.timer_manager.get_timer('Total').get() * remaining_num_of_optimize % 60)
+            logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.timesteps} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")            
+            for k, v in self.timer_manager.timers.items():
+                logger.info(f"\t\t {k} time: {v.get()} sec")
+            logger.info(f"\t\t Estimated training time remaining: {remaining_training_time_min} min {remaining_training_time_sec} sec")
 
             # Save best model
             if avg_score >= best_score:

@@ -2,7 +2,7 @@ device: "cpu"
 seed: 77
 env:
     env_name: "Ant-v4"
-    num_envs: 20
+    num_envs: 120
     is_continuous: True
     state_dim: 27
     action_dim: 8
@@ -15,14 +15,14 @@ network:
         betas: [0.9, 0.999]
         eps: 1e-5
 train: 
-    total_timesteps: 1000000
-    max_episode_len: 2048
+    total_timesteps: 5000000
+    max_episode_len: 128
     gamma: 0.99
     tau: 0.95
     ppo:
         loss_type: clip
         optim_epochs: 10
-        batch_size: 1024
+        batch_size: 3840
         eps_clip: 0.2
         coef_value_function: 0.5
         coef_entropy_penalty: 0.001
