@@ -32,9 +32,6 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Get config
-    config = get_config(args.config)
-
     # Setting logging
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                         datefmt='%m/%d/%Y %H:%M:%S',
@@ -42,22 +39,27 @@ def main():
                         handlers=[logging.StreamHandler()])
     logging.info(f"Description: {args.desc}")
 
-    trainer = PPOAgent(config,
-                       get_device())
     if args.load_postfix and args.experiment_path:
         trainer = PPOAgent.load(experiment_path=args.experiment_path, 
                                 postfix=args.load_postfix,
                                 resume=not args.not_resume)
+    else:
+        # Get config
+        config = get_config(args.config)
+        trainer = PPOAgent(config,
+                        get_device())
+        
 
     if args.train:
-        envs = envpool.make(config.env.env_name, 
+        envs = envpool.make(trainer.config.env.env_name, 
                             env_type="gymnasium", 
-                            num_envs=config.env.num_envs)
+                            num_envs=trainer.config.env.num_envs)
         trainer.step(envs, args.exp_name)
 
     if args.eval:
-        env = create_mujoco_env(config.env.env_name, video_path='videos')
+        env = create_mujoco_env(trainer.config.env.env_name, video_path='videos')
         trainer.play(
+            env=env,
             num_episodes=args.eval_n_episode,
             max_ep_len=2048
         )

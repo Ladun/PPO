@@ -82,7 +82,7 @@ class RewardScaler:
         self.rs.load_variables(torch.load(load_path))
 
 
-class ObservationScaler:
+class ObservationNormalizer:
     def __init__(self):
         self.rs = RunningStat()
 

@@ -39,8 +39,8 @@ import gymnasium as gym
 #         env = gym.wrappers.FrameStack(env, stack_frame)
 #     return env
 
-def create_mujoco_env(env_name, video_store_path=None):
+def create_mujoco_env(env_name, video_path=None):
     env = gym.make(env_name, render_mode='rgb_array')
-    if video_store_path:
-        env = gym.wrappers.RecordVideo(env, video_store_path)
+    if video_path:
+        env = gym.wrappers.RecordVideo(env, video_path)
     return env

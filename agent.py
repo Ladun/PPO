@@ -23,9 +23,9 @@ from scheduler import WarmupLinearSchedule
 from utils.general import (
     set_seed, get_rng_state, set_rng_state,
     pretty_config, get_cur_time_code,
-    TimerManager
+    TimerManager, get_config, get_device
 )
-from utils.stuff import RewardScaler
+from utils.stuff import RewardScaler, ObservationNormalizer
 from utils.expert import get_expert_data
 
 
@@ -39,6 +39,7 @@ class PPOAgent:
         self.config = config
         self.device = device
         
+        set_seed(self.config.seed)
         rng_state, _ = gym.utils.seeding.np_random(self.config.seed)
         self.env_rng_state = rng_state
         
@@ -61,18 +62,18 @@ class PPOAgent:
         if self.config.train.scheduler:
             self.scheduler = WarmupLinearSchedule(optimizer=self.optimizer,
                                                   warmup_steps=0,#int(self.config.train.max_episodes * 0.1),
-                                                  max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len)
+                                                  max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len * self.config.env.num_envs)
             if 'gail' in self.config:
                 self.disc_scheduler = WarmupLinearSchedule(optimizer=self.disc_optimizer,
                                                            warmup_steps=0, 
-                                                           max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len)
+                                                           max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len* self.config.env.num_envs)
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
             self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
 
         # [EXPERIMENT] - observation scaler: (ob - ob.mean()) / (ob.std())
-        # if self.config.train_observation_scaler:
-        #     self.obs_scaler = ObservationScaler()
+        if self.config.train.observation_normalizer:
+            self.obs_normalizer = ObservationNormalizer()
 
         self.timer_manager = TimerManager()
         self.writer = None
@@ -141,7 +142,8 @@ class PPOAgent:
     def load(cls, experiment_path, postfix, resume=True):
 
         config = get_config(os.path.join(experiment_path, "config.yaml"))
-        ppo_algo = PPOAlgo(config, get_device(config.device))
+        config.network.action_std_init = config.network.min_action_std
+        ppo_algo = PPOAgent(config, get_device(config.device))
         
         # Create a variable to indicate which path the model will be read from
         ckpt_path = os.path.join(experiment_path, "checkpoints", postfix)
@@ -166,8 +168,8 @@ class PPOAgent:
         if resume:
             ppo_algo.timesteps = int(lines[0])
             ppo_algo.trained_epoch = int(lines[1])
-            if os.path.exist(os.path.join(ckpt_path, 'env_rng_state.ckpt')):
-                self.env_rng_state = torch.load(os.path.join(ckpt_path, 'env_rng_state.ckpt'), map_location='cpu')
+            if os.path.exists(os.path.join(ckpt_path, 'env_rng_state.ckpt')):
+                ppo_algo.env_rng_state = torch.load(os.path.join(ckpt_path, 'env_rng_state.ckpt'), map_location='cpu')
 
         return ppo_algo
 
@@ -282,6 +284,7 @@ class PPOAgent:
                 # --- policy loss
                 _, cur_logp, cur_ent, cur_v = self.network(ob, action=ac)
                 cur_v = cur_v.reshape(-1)
+
                 ratio = torch.exp(cur_logp - old_logp)
                 surr1 = ratio * adv
 
@@ -301,18 +304,21 @@ class PPOAgent:
                 
                 policy_surr = -policy_surr.mean()
 
+                # --- entropy loss
+
+                policy_ent = -cur_ent.mean()
+
                 # --- value loss
 
                 if self.config.train.ppo.value_clipping:
                     cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
-                    vloss1 = F.smooth_l1_loss(cur_v, vtarg)
-                    vloss2 = F.smooth_l1_loss(cur_v_clipped, vtarg)
-                    vf_loss = torch.max(vloss1, vloss2).mean()
+                    vloss1 = (cur_v - vtarg) ** 2 # F.smooth_l1_loss(cur_v, vtarg, reduction='none')
+                    vloss2 = (cur_v_clipped - vtarg) ** 2 # F.smooth_l1_loss(cur_v_clipped, vtarg, reduction='none')
+                    vf_loss = torch.max(vloss1, vloss2)
                 else:
-                    vf_loss =  F.smooth_l1_loss(cur_v, vtarg).mean()
-
-                # --- entropy loss
-                policy_ent = -cur_ent.mean()
+                    vf_loss = (cur_v - vtarg) ** 2 #F.smooth_l1_loss(cur_v, vtarg, reduction='none')
+                    
+                vf_loss = vf_loss.mean()
 
                 # -------- Backward process --------
 
@@ -320,10 +326,10 @@ class PPOAgent:
                 c2 = self.config.train.ppo.coef_entropy_penalty
 
                 self.optimizer.zero_grad()
-                policy_loss = policy_surr + c2 * policy_ent
+                policy_loss = policy_surr
                 value_loss = c1 * vf_loss
 
-                total_loss = policy_loss + value_loss
+                total_loss = policy_loss + c2 * policy_ent + value_loss
                 total_loss.backward()
 
                 if self.config.train.clipping_gradient:
@@ -395,6 +401,8 @@ class PPOAgent:
             device=self.device
         )
           
+        # for continuous action space
+        next_action_std_decay_step = self.config.network.action_std_decay_freq
 
         '''
         Environment symbol's information
@@ -433,11 +441,25 @@ class PPOAgent:
                         values       (num_envs, 1)               torch.Tensor
                         ===========  ==========================  ==================
                         '''
+
+                            
                         with torch.no_grad():
+                            if self.config.train.observation_normalizer:
+                                state = self.obs_normalizer(state)
                             action, logprobs, _, values = self.network(torch.from_numpy(state).to(self.device, dtype=torch.float))
                             values = values.flatten() # reshape shape of the value to (num_envs,)
                         next_state, reward, terminated, truncated, _ = envs.step(action.cpu().numpy())
                         self.timesteps += len(envs)
+
+                        # action std decaying
+                        if self.config.env.is_continuous:
+                            if self.timesteps > next_action_std_decay_step:
+                                next_action_std_decay_step +=  self.config.network.action_std_decay_freq
+                                self.network.action_decay(
+                                    self.config.network.action_std_decay_rate,
+                                    self.config.network.min_action_std
+                                )
+                            
 
                         # update episodic_reward
                         episodic_reward += reward
@@ -481,6 +503,8 @@ class PPOAgent:
 
                 # Estimate next state value for gae
                 with torch.no_grad():
+                    if self.config.train.observation_normalizer:
+                        next_state = self.obs_normalizer(next_state)
                     _, _, _, next_value = self.network(torch.Tensor(next_state).to(self.device))
                     next_value = next_value.flatten()
 
@@ -521,7 +545,7 @@ class PPOAgent:
                                                       (self.config.env.num_envs * self.config.train.max_episode_len)))
             remaining_training_time_min = int(self.timer_manager.get_timer('Total').get() * remaining_num_of_optimize // 60)
             remaining_training_time_sec = int(self.timer_manager.get_timer('Total').get() * remaining_num_of_optimize % 60)
-            logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.timesteps} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")            
+            logger.info(f"[{datetime.now().replace(microsecond=0) - start_time}] {self.timesteps}/{self.config.train.total_timesteps} - score: {avg_score} +-{std_score} \t duration: {avg_duration}")
             for k, v in self.timer_manager.timers.items():
                 logger.info(f"\t\t {k} time: {v.get()} sec")
             logger.info(f"\t\t Estimated training time remaining: {remaining_training_time_min} min {remaining_training_time_sec} sec")
@@ -555,7 +579,7 @@ class PPOAgent:
 
                 with torch.no_grad():
                     action, _, _, _ = self.network(torch.Tensor(state).unsqueeze(0).to(self.device))
-                next_state, reward, terminated, truncated, info = env.step(action.cpu().numpy().item())
+                next_state, reward, terminated, truncated, info = env.step(action.cpu().numpy().squeeze(0))
                 done = terminated + truncated
 
                 episodic_reward += reward

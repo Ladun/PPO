@@ -74,7 +74,8 @@ class PPOMemory:
         # Remove value in the next state
         storage['value'] = storage['value'][:steps]
         storage['v_target'] = storage['advant'] + storage['value']
-
+        # storage['v_target'] = rewards[:steps]
+        
         # The first two values ​​refer to the trajectory length and number of envs.
         storage = {k: v.reshape(-1, *v.size()[2:]) for k, v in storage.items()}
 
