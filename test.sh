@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# python main.py --train \
-#                --config=configs/Ant-v4.yaml \
+python main.py --train \
+               --config=configs/Ant-v4.yaml \
 
 
-python main.py --eval \
-               --experiment_path=/workspaces/PPO/checkpoints/exp20240321113555 \
-               --load_postfix=timesteps15022080
+# python main.py --eval \
+#                --experiment_path=/workspaces/PPO/checkpoints/exp20240321141612 \
+#                --load_postfix=best

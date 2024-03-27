@@ -45,6 +45,7 @@ class PPOAgent:
         
         # -------- Define models --------
         self.network = ActorCritic(config, device).to(device)
+        self.old_network = ActorCritic(config, device).to(device)
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
             **self.config.network.optimizer
@@ -62,11 +63,11 @@ class PPOAgent:
         if self.config.train.scheduler:
             self.scheduler = WarmupLinearSchedule(optimizer=self.optimizer,
                                                   warmup_steps=0,#int(self.config.train.max_episodes * 0.1),
-                                                  max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len * self.config.env.num_envs)
+                                                  max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
             if 'gail' in self.config:
                 self.disc_scheduler = WarmupLinearSchedule(optimizer=self.disc_optimizer,
                                                            warmup_steps=0, 
-                                                           max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len* self.config.env.num_envs)
+                                                           max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len* self.config.env.num_envs))
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
             self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
@@ -173,18 +174,6 @@ class PPOAgent:
 
         return ppo_algo
 
-    def prepare_data(self, data):       
-        s        = data['state'].float()
-        a        = data['action']
-        logp     = data['logprob'].float()
-        v_target = data['v_target'].float()
-        adv      = data['advant'].float()
-        v        = data['value'].float()
-
-        # normalize advant a.k.a atarg
-        adv = (adv - adv.mean()) / (adv.std() + 1e-5)
-
-        return s, a, logp, adv, v_target, v
 
     def optimize_gail(self, data):
 
@@ -277,27 +266,32 @@ class PPOAgent:
             data_loader = ppo_iter(self.config.train.ppo.batch_size, data)
 
             for batch in data_loader:
-                ob, ac, old_logp, adv, vtarg, old_v = batch
+                bev_ob, bev_ac, bev_logp, bev_adv, bev_vtarg, bev_v = batch
 
                 # -------- Loss calculate --------
 
                 # --- policy loss
-                _, cur_logp, cur_ent, cur_v = self.network(ob, action=ac)
+                _, cur_logp, cur_ent, cur_v = self.network(bev_ob, action=bev_ac)
+                with torch.no_grad():
+                    _, old_logp, _, _ = self.old_network(bev_ob, action=bev_ac)
                 cur_v = cur_v.reshape(-1)
 
-                ratio = torch.exp(cur_logp - old_logp)
-                surr1 = ratio * adv
+                ratio = torch.exp(cur_logp - bev_logp)
+                surr1 = ratio * bev_adv
 
                 if self.config.train.ppo.loss_type == "clip":
+                    lower = (1 - self.config.train.ppo.eps_clip) * torch.exp(old_logp - bev_logp)
+                    upper = (1 + self.config.train.ppo.eps_clip) * torch.exp(old_logp - bev_logp)
+
                     # clipped loss
-                    clipped_ratio = torch.clamp(ratio, 1. - self.config.train.ppo.eps_clip, 1. + self.config.train.ppo.eps_clip)
-                    surr2 = clipped_ratio * adv
+                    clipped_ratio = torch.clamp(ratio, lower, upper)
+                    surr2 = clipped_ratio * bev_adv
 
                     policy_surr = torch.min(surr1, surr2)
                     
                 elif self.config.train.ppo.loss_type == "kl":
                     # kl-divergence loss
-                    policy_surr = surr1 - 0.01 * torch.exp(old_logp) * (old_logp - cur_logp)
+                    policy_surr = surr1 - 0.01 * torch.exp(bev_logp) * (bev_logp - cur_logp)
                 else:
                     # simple ratio loss
                     policy_surr = surr1
@@ -311,12 +305,12 @@ class PPOAgent:
                 # --- value loss
 
                 if self.config.train.ppo.value_clipping:
-                    cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
-                    vloss1 = (cur_v - vtarg) ** 2 # F.smooth_l1_loss(cur_v, vtarg, reduction='none')
-                    vloss2 = (cur_v_clipped - vtarg) ** 2 # F.smooth_l1_loss(cur_v_clipped, vtarg, reduction='none')
+                    cur_v_clipped = bev_v + (cur_v - bev_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
+                    vloss1 = (cur_v - bev_vtarg) ** 2 # F.smooth_l1_loss(cur_v, vtarg, reduction='none')
+                    vloss2 = (cur_v_clipped - bev_vtarg) ** 2 # F.smooth_l1_loss(cur_v_clipped, vtarg, reduction='none')
                     vf_loss = torch.max(vloss1, vloss2)
                 else:
-                    vf_loss = (cur_v - vtarg) ** 2 #F.smooth_l1_loss(cur_v, vtarg, reduction='none')
+                    vf_loss = (cur_v - bev_vtarg) ** 2 #F.smooth_l1_loss(cur_v, vtarg, reduction='none')
                     
                 vf_loss = vf_loss.mean()
 
@@ -326,10 +320,8 @@ class PPOAgent:
                 c2 = self.config.train.ppo.coef_entropy_penalty
 
                 self.optimizer.zero_grad()
-                policy_loss = policy_surr
-                value_loss = c1 * vf_loss
 
-                total_loss = policy_loss + c2 * policy_ent + value_loss
+                total_loss = policy_surr + c2 * policy_ent + c1 * vf_loss
                 total_loss.backward()
 
                 if self.config.train.clipping_gradient:
@@ -354,7 +346,28 @@ class PPOAgent:
 
             self.trained_epoch += 1
 
-    def optimize(self, data):
+
+    def prepare_data(self, data):       
+        s        = data['state'].float()
+        a        = data['action']
+        logp     = data['logprob'].float()
+        v_target = data['v_target'].float()
+        adv      = data['advant'].float()
+        v        = data['value'].float()
+
+        # normalize advant a.k.a atarg
+        adv = (adv - adv.mean()) / (adv.std() + 1e-5)
+
+        return s, a, logp, adv, v_target, v
+
+
+    def optimize(self, next_state, next_value, done):
+
+        self.old_network.load_state_dict(self.network.state_dict())
+
+        with self.timer_manager.get_timer("Calculate gae"):
+            self.memory.finish(next_state, next_value, done)
+            data = self.memory.get_data(self.config.env.num_envs, self.old_network)
         data = self.prepare_data(data)
 
         if 'gail' in self.config:
@@ -399,7 +412,7 @@ class PPOAgent:
             gamma=self.config.train.gamma,
             tau=self.config.train.tau,
             device=self.device
-        )
+        )        
           
         # for continuous action space
         next_action_std_decay_step = self.config.network.action_std_decay_freq
@@ -511,9 +524,7 @@ class PPOAgent:
                 # update gae & tdlamret
                 # Optimize
                 with self.timer_manager.get_timer("Optimize"):
-                    with self.timer_manager.get_timer("Calculate gae"):
-                        data = self.memory.compute_gae_and_get(next_value, done)
-                    self.optimize(data)
+                    self.optimize(torch.Tensor(next_state), next_value, done)
 
                 # scheduling learning rate
                 if self.config.train.scheduler:
