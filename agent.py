@@ -417,7 +417,7 @@ class PPOAgent:
             gamma=self.config.train.gamma,
             tau=self.config.train.tau,
             device=self.device
-        )
+        )        
           
         # for continuous action space
         next_action_std_decay_step = self.config.network.action_std_decay_freq

@@ -64,6 +64,7 @@ class ActorCritic(nn.Module):
             self.action_dim = config.env.action_dim
             self.action_std = config.network.action_std_init
             self.action_var = torch.full((self.action_dim, ), config.network.action_std_init ** 2).to(self.device)
+            # self.actor_logstd = nn.Parameter(torch.log(torch.ones(1, config.env.action_dim) * config.network.action_std_init))
 
         if self.shared_layer:
             self.shared_net = nn.Sequential(
@@ -106,7 +107,6 @@ class ActorCritic(nn.Module):
             self.action_std = round(self.action_std, 4)
             if (self.action_std <= min_action_std):
                 self.action_std = min_action_std
-
 
             self.action_var = torch.full((self.action_dim, ), self.action_std ** 2).to(self.device)
         else:
