@@ -2,12 +2,15 @@
 import argparse
 import os
 import logging
+import gymnasium as gym
 
 import envpool
 
 from agent import PPOAgent
 from utils.general import get_device, get_config
-from utils.evaluation_env import create_mujoco_env
+from utils.envs import (
+    create_mujoco_env
+)
 
 
 def parse_args():
@@ -46,9 +49,7 @@ def main():
     else:
         # Get config
         config = get_config(args.config)
-        trainer = PPOAgent(config,
-                        get_device())
-        
+        trainer = PPOAgent(config)        
 
     if args.train:
         envs = envpool.make(trainer.config.env.env_name, 

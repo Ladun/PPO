@@ -34,17 +34,17 @@ from utils.expert import get_expert_data
 logger = logging.getLogger(__name__)
 
 class PPOAgent:
-    def __init__(self, config, device):
+    def __init__(self, config):
 
         self.config = config
-        self.device = device
+        self.device = get_device(config.device)
         
         set_seed(self.config.seed)
         rng_state, _ = gym.utils.seeding.np_random(self.config.seed)
         self.env_rng_state = rng_state
         
         # -------- Define models --------
-        self.network = ActorCritic(config, device).to(device)
+        self.network = ActorCritic(config, self.device).to(self.device)
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
             **self.config.network.optimizer
@@ -61,28 +61,30 @@ class PPOAgent:
 
         if self.config.train.scheduler:
             self.scheduler = WarmupLinearSchedule(optimizer=self.optimizer,
-                                                  warmup_steps=0,#int(self.config.train.max_episodes * 0.1),
-                                                  max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len * self.config.env.num_envs)
+                                                  warmup_steps=0,
+                                                  max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
             if 'gail' in self.config:
                 self.disc_scheduler = WarmupLinearSchedule(optimizer=self.disc_optimizer,
                                                            warmup_steps=0, 
-                                                           max_steps=self.config.train.total_timesteps // self.config.train.max_episode_len* self.config.env.num_envs)
+                                                           max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
-            self.reward_scaler = RewardScaler(gamma=self.config.train.gamma)
+            self.reward_scaler = RewardScaler(self.config.env.num_envs, gamma=self.config.train.gamma)
 
         # [EXPERIMENT] - observation scaler: (ob - ob.mean()) / (ob.std())
         if self.config.train.observation_normalizer:
-            self.obs_normalizer = ObservationNormalizer()
+            sp = (config.env.state_dim, ) if isinstance(config.env.state_dim, int) else list(config.env.state_dim)
+            self.obs_normalizer = ObservationNormalizer(self.config.env.num_envs, sp)
 
-        self.timer_manager = TimerManager()
-        self.writer = None
-        self.memory = None
+        self.timer_manager  = TimerManager()
+        self.writer         = None
+        self.memory         = None
         self.timesteps      = 0
         self.trained_epoch  = 0
 
         logger.info("----------- Config -----------")
         pretty_config(config, logger=logger)
+        logger.info(f"Device: {self.device}")
     
 
     def save(self, postfix, envs=None):
@@ -181,8 +183,8 @@ class PPOAgent:
         adv      = data['advant'].float()
         v        = data['value'].float()
 
-        # normalize advant a.k.a atarg
-        adv = (adv - adv.mean()) / (adv.std() + 1e-5)
+        # # normalize advant a.k.a atarg
+        # adv = (adv - adv.mean()) / (adv.std() + 1e-5)
 
         return s, a, logp, adv, v_target, v
 
@@ -276,71 +278,71 @@ class PPOAgent:
         for _ in range(self.config.train.ppo.optim_epochs):
             data_loader = ppo_iter(self.config.train.ppo.batch_size, data)
 
-            for batch in data_loader:
-                ob, ac, old_logp, adv, vtarg, old_v = batch
+            with self.timer_manager.get_timer("\t\tone_epoch"):
+                for batch in data_loader:
+                    ob, ac, old_logp, adv, vtarg, old_v = batch
+                    adv = (adv - adv.mean()) / (adv.std() + 1e-7)
 
-                # -------- Loss calculate --------
+                    # -------- Loss calculate --------
 
-                # --- policy loss
-                _, cur_logp, cur_ent, cur_v = self.network(ob, action=ac)
-                cur_v = cur_v.reshape(-1)
+                    # --- policy loss
+                    _, cur_logp, cur_ent, cur_v = self.network(ob, action=ac)
+                    cur_v = cur_v.reshape(-1)
 
-                ratio = torch.exp(cur_logp - old_logp)
-                surr1 = ratio * adv
+                    ratio = torch.exp(cur_logp - old_logp)
+                    surr1 = ratio * adv
 
-                if self.config.train.ppo.loss_type == "clip":
-                    # clipped loss
-                    clipped_ratio = torch.clamp(ratio, 1. - self.config.train.ppo.eps_clip, 1. + self.config.train.ppo.eps_clip)
-                    surr2 = clipped_ratio * adv
+                    if self.config.train.ppo.loss_type == "clip":
+                        # clipped loss
+                        clipped_ratio = torch.clamp(ratio, 1. - self.config.train.ppo.eps_clip, 1. + self.config.train.ppo.eps_clip)
+                        surr2 = clipped_ratio * adv
 
-                    policy_surr = torch.min(surr1, surr2)
+                        policy_surr = torch.min(surr1, surr2)
+                        
+                    elif self.config.train.ppo.loss_type == "kl":
+                        # kl-divergence loss
+                        policy_surr = surr1 - 0.01 * torch.exp(old_logp) * (old_logp - cur_logp)
+                    else:
+                        # simple ratio loss
+                        policy_surr = surr1
                     
-                elif self.config.train.ppo.loss_type == "kl":
-                    # kl-divergence loss
-                    policy_surr = surr1 - 0.01 * torch.exp(old_logp) * (old_logp - cur_logp)
-                else:
-                    # simple ratio loss
-                    policy_surr = surr1
-                
-                policy_surr = -policy_surr.mean()
+                    policy_surr = -policy_surr.mean()
 
-                # --- entropy loss
+                    # --- entropy loss
 
-                policy_ent = -cur_ent.mean()
+                    policy_ent = -cur_ent.mean()
 
-                # --- value loss
+                    # --- value loss
 
-                if self.config.train.ppo.value_clipping:
-                    cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
-                    vloss1 = (cur_v - vtarg) ** 2 # F.smooth_l1_loss(cur_v, vtarg, reduction='none')
-                    vloss2 = (cur_v_clipped - vtarg) ** 2 # F.smooth_l1_loss(cur_v_clipped, vtarg, reduction='none')
-                    vf_loss = torch.max(vloss1, vloss2)
-                else:
-                    vf_loss = (cur_v - vtarg) ** 2 #F.smooth_l1_loss(cur_v, vtarg, reduction='none')
-                    
-                vf_loss = vf_loss.mean()
+                    if self.config.train.ppo.value_clipping:
+                        cur_v_clipped = old_v + (cur_v - old_v).clamp(-self.config.train.ppo.eps_clip, self.config.train.ppo.eps_clip)
+                        vloss1 = (cur_v - vtarg) ** 2 # F.smooth_l1_loss(cur_v, vtarg, reduction='none')
+                        vloss2 = (cur_v_clipped - vtarg) ** 2 # F.smooth_l1_loss(cur_v_clipped, vtarg, reduction='none')
+                        vf_loss = torch.max(vloss1, vloss2)
+                    else:
+                        vf_loss = (cur_v - vtarg) ** 2 #F.smooth_l1_loss(cur_v, vtarg, reduction='none')
+                        
+                    vf_loss = 0.5 * vf_loss.mean()
 
-                # -------- Backward process --------
+                    # -------- Backward process --------
 
-                c1 = self.config.train.ppo.coef_value_function
-                c2 = self.config.train.ppo.coef_entropy_penalty
+                    c1 = self.config.train.ppo.coef_value_function
+                    c2 = self.config.train.ppo.coef_entropy_penalty
 
-                self.optimizer.zero_grad()
-                policy_loss = policy_surr
-                value_loss = c1 * vf_loss
+                    total_loss = policy_surr + c2 * policy_ent + c1 * vf_loss
 
-                total_loss = policy_loss + c2 * policy_ent + value_loss
-                total_loss.backward()
+                    self.optimizer.zero_grad()
+                    total_loss.backward()
+                    if self.config.train.clipping_gradient:
+                        nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
+                    self.optimizer.step()
 
-                if self.config.train.clipping_gradient:
-                    nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
+                    # ---------- Record training loss data ----------
 
-                self.optimizer.step()
-
-                policy_losses.append(policy_surr.item())
-                entropy_losses.append(policy_ent.item())
-                value_losses.append(vf_loss.item())
-                total_losses.append(total_loss.item())
+                    policy_losses.append(policy_surr.item())
+                    entropy_losses.append(policy_ent.item())
+                    value_losses.append(vf_loss.item())
+                    total_losses.append(total_loss.item())
 
             avg_policy_loss = np.mean(policy_losses)
             avg_entropy_loss = np.mean(entropy_losses)
@@ -355,12 +357,14 @@ class PPOAgent:
             self.trained_epoch += 1
 
     def optimize(self, data):
-        data = self.prepare_data(data)
+        with self.timer_manager.get_timer("\tprepare_data"):
+            data = self.prepare_data(data)
 
         if 'gail' in self.config:
             self.optimize_gail(data)
 
-        self.optimize_ppo(data)
+        with self.timer_manager.get_timer("\toptimize_ppo"):
+            self.optimize_ppo(data)
 
 
     def step(self, envs, exp_name=None):
@@ -375,6 +379,20 @@ class PPOAgent:
         # Create an experiment directory to record training data
         self.config.experiment_name = f"exp{get_cur_time_code()}" if exp_name is None else exp_name
         self.config.experiment_path = os.path.join(self.config.checkpoint_path, self.config.experiment_name)
+
+        # If an existing experiment has the same name, add a number to the end of the path.
+        while os.path.exists(self.config.experiment_path):
+            exp_name  = self.config.experiment_path[len(self.config.checkpoint_path) + 1:]
+            exp_split = exp_name.split("_")
+
+            try:
+                exp_num  = int(exp_split[-1]) + 1
+                exp_name = f"{'_'.join(exp_split[:max(1, len(exp_split) - 1)])}_{str(exp_num)}"
+            except:
+                exp_name = f"{exp_name}_0"
+
+            self.config.experiment_name = exp_name
+            self.config.experiment_path = os.path.join(self.config.checkpoint_path, self.config.experiment_name)
         os.makedirs(self.config.experiment_path, exist_ok=True)
         logger.addHandler( logging.FileHandler(os.path.join(self.config.experiment_path, f"running_train_log.log")))
 
@@ -386,13 +404,13 @@ class PPOAgent:
         reward_queue    = deque([0], maxlen=self.config.train.average_interval)
         duration_queue  = deque([0], maxlen=self.config.train.average_interval)
         if 'gail' in self.config:
-            irl_score_queue = deque([0], maxlen=self.config.train.average_interval)
+            irl_score_queue     = deque([0], maxlen=self.config.train.average_interval)
 
-        episodic_reward = np.zeros(len(envs))
-        duration = np.zeros(len(envs))
+        episodic_reward = np.zeros(self.config.env.num_envs)
+        duration        = np.zeros(self.config.env.num_envs)
         if 'gail' in self.config:
-            irl_episodic_reward = np.zeros(len(envs))
-        best_score = -1e9
+            irl_episodic_reward = np.zeros(self.config.env.num_envs)
+        best_score      = -1e9
 
         # make rollout buffer
         self.memory = PPOMemory(
@@ -415,8 +433,8 @@ class PPOAgent:
         done         (num_envs,)                 numpy.ndarray
         ===========  ==========================  ==================
         '''
-        state, info  = envs.reset()
-        done = np.zeros(len(envs))
+        state, _  = envs.reset()
+        done = np.zeros(self.config.env.num_envs)
 
         # -------- Training Loop --------
         
@@ -448,18 +466,8 @@ class PPOAgent:
                                 state = self.obs_normalizer(state)
                             action, logprobs, _, values = self.network(torch.from_numpy(state).to(self.device, dtype=torch.float))
                             values = values.flatten() # reshape shape of the value to (num_envs,)
-                        next_state, reward, terminated, truncated, _ = envs.step(action.cpu().numpy())
-                        self.timesteps += len(envs)
-
-                        # action std decaying
-                        if self.config.env.is_continuous:
-                            if self.timesteps > next_action_std_decay_step:
-                                next_action_std_decay_step +=  self.config.network.action_std_decay_freq
-                                self.network.action_decay(
-                                    self.config.network.action_std_decay_rate,
-                                    self.config.network.min_action_std
-                                )
-                            
+                        next_state, reward, terminated, truncated, _ = envs.step(np.clip(action.cpu().numpy(), envs.action_space.low, envs.action_space.high))
+                        self.timesteps += self.config.env.num_envs
 
                         # update episodic_reward
                         episodic_reward += reward
@@ -471,7 +479,7 @@ class PPOAgent:
                                 irl_episodic_reward += reward
 
                         if self.config.train.reward_scaler:
-                            reward = self.reward_scaler(reward, update=True)
+                            reward = self.reward_scaler(reward, terminated + truncated)
                             
                         # add experience to the memory                    
                         self.memory.store(
@@ -497,7 +505,7 @@ class PPOAgent:
                                     irl_score_queue[idx] = 0
                         
                         # update state
-                        state = next_state
+                        state = next_state                        
                     
                 # ------------- Calculate gae for optimizing-------------
 
@@ -514,6 +522,15 @@ class PPOAgent:
                     with self.timer_manager.get_timer("Calculate gae"):
                         data = self.memory.compute_gae_and_get(next_value, done)
                     self.optimize(data)
+
+                # action std decaying
+                if self.config.env.is_continuous:
+                    while self.timesteps > next_action_std_decay_step:
+                        next_action_std_decay_step +=  self.config.network.action_std_decay_freq
+                        self.network.action_decay(
+                            self.config.network.action_std_decay_rate,
+                            self.config.network.min_action_std
+                        )
 
                 # scheduling learning rate
                 if self.config.train.scheduler:
