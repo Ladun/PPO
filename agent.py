@@ -265,18 +265,16 @@ class PPOAgent:
                 yield ob[ind], ac[ind], oldpas[ind], adv[ind], tdlamret[ind], old_v[ind]
 
 
-        # -------- Initialize --------
-
-        policy_losses   = []
-        entropy_losses  = []
-        value_losses    = []
-        total_losses    = []
-
         # -------- PPO Training Loop --------
 
         self.network.train()
         for _ in range(self.config.train.ppo.optim_epochs):
             data_loader = ppo_iter(self.config.train.ppo.batch_size, data)
+
+            policy_losses   = []
+            entropy_losses  = []
+            value_losses    = []
+            total_losses    = []
 
             with self.timer_manager.get_timer("\t\tone_epoch"):
                 for batch in data_loader:
