@@ -37,21 +37,27 @@ python main.py --experiment_path=checkpoints/Ant/test
 
 # Result
 
-| Mujoco Ant-v4 | Mujoco Ant-v4 |
-| :-------------------------:|:-------------------------: |
-| <video src="https://github.com/Ladun/PPO/blob/master/plots/ant.mp4" width="320" height="240" controls></video>|  ![](https://github.com/Ladun/PPO/blob/master/plots/ant.png) |
+## Ant-v4
+ ![](https://github.com/Ladun/PPO/blob/master/plots/ant.png) 
+ 
+https://github.com/Ladun/PPO/assets/47883234/243abecb-16a4-4ffc-920f-70b644675660
 
-| Mujoco Reacher-v4 | Mujoco Reacher-v4 |
-| :-------------------------:|:-------------------------: |
-| <video src="https://github.com/Ladun/PPO/blob/master/plots/reacher.mp4" width="320" height="240" controls></video> |  ![](https://github.com/Ladun/PPO/blob/master/plots/reacher.png) |
+## Reacher-v4
+![](https://github.com/Ladun/PPO/blob/master/plots/reacher.png) 
 
-| Mujoco HalfCheetah-v4 | Mujoco HalfCheetah-v4 |
-| :-------------------------:|:-------------------------: |
-| <video src="https://github.com/Ladun/PPO/blob/master/plots/cheetah.mp4" width="320" height="240" controls></video>|  ![](https://github.com/Ladun/PPO/blob/master/plots/cheetah.png) |
 
+https://github.com/Ladun/PPO/assets/47883234/ff5705e9-b544-41af-a477-10459508f9ac
+
+## HalfCheetah-v4 
+ ![](https://github.com/Ladun/PPO/blob/master/plots/cheetah.png) 
+
+https://github.com/Ladun/PPO/assets/47883234/5c1aabc2-f472-4bd1-b4bd-b44cf6cf39dd
 
 
 # Reference
-- IMPLEMENTATION MATTERS IN DEEP POLICY GRADIENTS: A CASE STUDY ON PPO AND TRPO
+- IMPLEMENTATION MATTERS IN DEEP POLICY GRADIENT
+
+
+S: A CASE STUDY ON PPO AND TRPO
 - https://github.com/junkwhinger/PPO_PyTorch
 - https://github.com/nikhilbarhate99/PPO-PyTorch
