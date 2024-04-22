@@ -19,9 +19,10 @@ python main.py --config=configs/Ant-v4.yaml
 ## Make expert dataset for gail
 
 ```
-python make_expert_dataset.py --config=experiments/Ant-v4/$Ant-v4_v1/config.yaml
+python make_expert_dataset.py --experiment_path=checkpoints/Ant/test
                               --load_postfix=last
-                              --minimum_score=3000
+                              --minimum_score=5000
+                              --n_episode=30
 ```
 
 # How to play
@@ -30,7 +31,7 @@ python main.py --experiment_path=checkpoints/Ant/test
                --eval
                --eval_n_episode=50
                --load_postfix=last
-               --video_path=path/to/video
+               --video_path=videos/Ant
 ```
 - load_path: pretrained model prefix(ex/ number of episode, 'best' or 'last') to play
 

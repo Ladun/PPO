@@ -158,7 +158,7 @@ class Discriminator(nn.Module):
 
         hidden_dim = config.gail.hidden_dim
         self.m = nn.Sequential(
-            nn.Linear(config.state_dim + config.action_dim, hidden_dim),
+            nn.Linear(config.env.state_dim + config.env.action_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),

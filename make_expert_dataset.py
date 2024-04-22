@@ -16,7 +16,7 @@ def parse_args():
                         help="path to pretrained model ")
     parser.add_argument("--load_postfix", type=str, required=True, 
                         help="pretrained model prefix(ex/ number of episode, 'best' or 'last') to play")
-    parser.add_argument("--n_episode", type=int, default=10)
+    parser.add_argument("--n_episode", type=int, default=30)
     parser.add_argument("--expert_dir", type=str, default='experts')
     parser.add_argument("--minimum_score", type=float, required=True)
     args = parser.parse_args()

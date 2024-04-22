@@ -220,11 +220,11 @@ class PPOAgent:
         learner_accuracies = []
         expert_accuracies = []
 
-        learner_iter = gail_iter(self.config.train.gail.batch_size, data[0:2])
-        expert_iter = gail_iter(self.config.train.gail.batch_size, self.expert_data)
+        learner_iter = gail_iter(self.config.gail.batch_size, data[0:2])
+        expert_iter = gail_iter(self.config.gail.batch_size, self.expert_data)
 
         self.disc.train()
-        for _ in range(self.config.train.gail.epoch):
+        for _ in range(self.config.gail.epoch):
             for ob, ac in learner_iter:
                 expert_ob, expert_ac = next(expert_iter)
 
@@ -255,9 +255,9 @@ class PPOAgent:
         avg_learner_accuracy = np.mean(learner_accuracies)
         avg_expert_accuracy = np.mean(expert_accuracies)
 
-        self.writer.add_scalar("train/discrim_loss", avg_d_loss, self.episode)
-        self.writer.add_scalars("train/gail_accuracy", {'learner': avg_learner_accuracy,
-                                                        'expert': avg_expert_accuracy}, self.episode)
+        self.writer.add_scalar("train/discrim_loss", avg_d_loss, self.trained_epoch)
+        self.writer.add_scalars("train/gail_learner_accuracy", avg_learner_accuracy, self.trained_epoch)
+        self.writer.add_scalars("train/gail_expert_accuracy", avg_expert_accuracy, self.trained_epoch)
                                                         
 
     def optimize_ppo(self, data):
@@ -369,7 +369,8 @@ class PPOAgent:
             data = self.prepare_data(data)
 
         if 'gail' in self.config:
-            self.optimize_gail(data)
+            with self.timer_manager.get_timer("\toptimize_gail"):
+                self.optimize_gail(data)
 
         with self.timer_manager.get_timer("\toptimize_ppo"):
             self.optimize_ppo(data)
@@ -472,7 +473,8 @@ class PPOAgent:
                         with torch.no_grad():
                             if self.config.train.observation_normalizer:
                                 state = self.obs_normalizer(state)
-                            action, logprobs, _, values = self.network(torch.from_numpy(state).to(self.device, dtype=torch.float))
+                            state = torch.from_numpy(state).to(self.device, dtype=torch.float)
+                            action, logprobs, _, values = self.network(state)
                             values = values.flatten() # reshape shape of the value to (num_envs,)
                         next_state, reward, terminated, truncated, _ = envs.step(np.clip(action.cpu().numpy(), envs.action_space.low, envs.action_space.high))
                         self.timesteps += self.config.env.num_envs
@@ -483,7 +485,7 @@ class PPOAgent:
 
                         if 'gail' in self.config:
                             with torch.no_grad():
-                                reward = self.disc.get_irl_reward(state, action).cpu().detach().numpy()
+                                reward = self.disc.get_irl_reward(state, action).cpu().detach().squeeze(-1).numpy()
                                 irl_episodic_reward += reward
 
                         if self.config.train.reward_scaler:
@@ -510,7 +512,7 @@ class PPOAgent:
                                 episodic_reward[idx] = 0
                                 duration[idx] = 0                    
                                 if 'gail' in self.config:
-                                    irl_score_queue[idx] = 0
+                                    irl_episodic_reward[idx] = 0
                         
                         # update state
                         state = next_state                        
