@@ -6,6 +6,7 @@
 experiments/*
 experts/*
 checkpoints/*
+videos/*
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

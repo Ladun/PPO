@@ -1,5 +1,5 @@
 omegaconf
-swig
-gymnasium[box2d]
 gymnasium[mujoco]
+envpool
+moviepy
 tensorboard

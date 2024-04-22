@@ -52,17 +52,18 @@ class ObservationNormalizer:
         self.num_envs = num_envs
         self.rms = RunningMeanStd(shape=obs_shape)
 
-    def __call__(self, obs):
-        self.rms.update(obs)
+    def __call__(self, obs, update=True):
+        if update:
+            self.rms.update(obs)
         return np.clip((obs - self.rms.mean) / np.sqrt(self.rms.var + 1e-8), -10, 10)
 
     def save(self, base_path):
         save_path = os.path.join(base_path, "observation_normalizer.pth")
-        torch.save(self.rs.save_variables(), save_path)
+        torch.save(self.rms.save_variables(), save_path)
 
     def load(self, base_path):
         load_path = os.path.join(base_path, "observation_normalizer.pth")
-        self.rs.load_variables(torch.load(load_path))
+        self.rms.load_variables(torch.load(load_path))
 
 
 # Reward scaler
@@ -72,9 +73,10 @@ class RewardScaler:
         self.gamma = gamma
         self.ret = np.zeros(num_envs)
 
-    def __call__(self, reward, dones):
+    def __call__(self, reward, dones, update=True):
         self.ret = self.ret * self.gamma + reward
-        self.rms.update(self.ret)
+        if update:
+            self.rms.update(self.ret)
         reward = reward / np.sqrt(self.rms.var + 1e-8)
 
         self.ret[dones] = 0

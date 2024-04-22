@@ -131,6 +131,11 @@ class PPOAgent:
             if 'gail' in self.config:
                 torch.save(self.disc_scheduler.state_dict(), os.path.join(ckpt_path, "disc_scheduler.pt"))
 
+        if self.config.train.reward_scaler:
+            self.reward_scaler.save(ckpt_path)
+        if self.config.train.observation_normalizer:
+            self.obs_normalizer.save(ckpt_path)
+
         # save random state
         torch.save(get_rng_state(), os.path.join(ckpt_path, 'rng_state.ckpt'))
         if envs:
@@ -145,7 +150,7 @@ class PPOAgent:
 
         config = get_config(os.path.join(experiment_path, "config.yaml"))
         config.network.action_std_init = config.network.min_action_std
-        ppo_algo = PPOAgent(config, get_device(config.device))
+        ppo_algo = PPOAgent(config)
         
         # Create a variable to indicate which path the model will be read from
         ckpt_path = os.path.join(experiment_path, "checkpoints", postfix)
@@ -160,6 +165,11 @@ class PPOAgent:
             ppo_algo.scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "scheduler.pt")))
             if 'gail' in ppo_algo.config:
                 ppo_algo.disc_scheduler.load_state_dict(torch.load(os.path.join(ckpt_path, "disc_scheduler.pt")))
+        
+        if ppo_algo.config.train.reward_scaler:
+            ppo_algo.reward_scaler.load(ckpt_path)
+        if ppo_algo.config.train.observation_normalizer:
+            ppo_algo.obs_normalizer.load(ckpt_path)
 
         # load random state
         set_rng_state(torch.load(os.path.join(ckpt_path, 'rng_state.ckpt'), map_location='cpu'))
@@ -438,7 +448,7 @@ class PPOAgent:
         
         print(f"================ Start training ================")
         print(f"========= Exp name: {self.config.experiment_name} ==========")
-        while self.timesteps < self.config.train.total_timesteps + 1:
+        while self.timesteps < self.config.train.total_timesteps:
 
             with self.timer_manager.get_timer("Total"):
                 with self.timer_manager.get_timer("Collect Trajectory"):
@@ -524,7 +534,7 @@ class PPOAgent:
                 # action std decaying
                 if self.config.env.is_continuous:
                     while self.timesteps > next_action_std_decay_step:
-                        next_action_std_decay_step +=  self.config.network.action_std_decay_freq
+                        next_action_std_decay_step += self.config.network.action_std_decay_freq
                         self.network.action_decay(
                             self.config.network.action_std_decay_rate,
                             self.config.network.min_action_std
@@ -593,13 +603,17 @@ class PPOAgent:
                 # ------------- Collect Trajectories -------------
 
                 with torch.no_grad():
-                    action, _, _, _ = self.network(torch.Tensor(state).unsqueeze(0).to(self.device))
-                next_state, reward, terminated, truncated, info = env.step(action.cpu().numpy().squeeze(0))
-                done = terminated + truncated
+                    if self.config.train.observation_normalizer:
+                        state = self.obs_normalizer(state, update=False)
+                    action, _, _, _ = self.network(torch.from_numpy(state).unsqueeze(0).to(self.device, dtype=torch.float))
+                next_state, reward, terminated, truncated, info = env.step(np.clip(action.cpu().numpy().squeeze(0), 
+                                                                                   env.action_space.low, 
+                                                                                   env.action_space.high))
 
                 episodic_reward += reward
                 duration += 1
 
+                done = terminated + truncated
                 if done:
                     break
 

@@ -1,54 +1,36 @@
 device: "cpu"
-seed: 11
+seed: 77
 env:
     env_name: "Reacher-v4"
+    num_envs: 30
     is_continuous: True
     state_dim: 11
     action_dim: 2
-checkpoint_path: "."
-actor: 
-    action_std_init: 0.1
-    arch: [
-        [nn.Linear, [state_dim, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, action_dim]],
-        [nn.Tanh, []]
-    ]
+checkpoint_path: "checkpoints/Reacher"
+network:
+    action_std_init: 0.4
+    action_std_decay_rate: 0.01
+    min_action_std: 0.1
+    action_std_decay_freq: 3e5
+    shared_layer: False
     optimizer:
-        lr: 1e-4
-        betas: [0.9, 0.999]
-        eps: 1e-5
-critic: 
-    arch: [
-        [nn.Linear, [state_dim, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, 64]],
-        [nn.Tanh, []],
-        [nn.Linear, [64, 1]]
-    ]
-    optimizer:
-        lr: 1e-4
-        betas: [0.9, 0.999]
-        eps: 1e-5
+        lr: 3e-4
 train: 
-    max_episodes: 1000
+    total_timesteps: 10000000
     max_episode_len: 1024
     gamma: 0.99
     tau: 0.95
     ppo:
         loss_type: clip
-        optim_epochs: 5
-        memory_size: 1024
-        batch_size: 32
+        optim_epochs: 10
+        batch_size: 960    
         eps_clip: 0.2
         coef_value_function: 0.5
-        coef_entropy_penalty: 0.001
-        value_clipping: False
+        coef_entropy_penalty: 0
+        value_clipping: True
     reward_scaler: True
+    observation_normalizer: True
     clipping_gradient: True
     scheduler: True
     average_interval: 100
-    log_interval: 100
-    save_interval: 100
+    max_ckpt_count: 3

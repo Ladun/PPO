@@ -1,13 +1,11 @@
 
 import argparse
-import os
 import logging
-import gymnasium as gym
 
 import envpool
 
 from agent import PPOAgent
-from utils.general import get_device, get_config
+from utils.general import get_config
 from utils.envs import (
     create_mujoco_env
 )
@@ -25,6 +23,8 @@ def parse_args():
                         help="pretrained model prefix(ex/ number of episode, 'best' or 'last') from same experiments")
     parser.add_argument("--experiment_path", type=str, default=None,
                         help="path to pretrained model ")
+    parser.add_argument("--video_path", type=str, default='videos',
+                        help="path to saving playing video ")
     parser.add_argument("--not_resume", action='store_true')
     parser.add_argument("--desc", type=str, default="",
                         help="Additional description of the executing code")
@@ -58,7 +58,7 @@ def main():
         trainer.step(envs, args.exp_name)
 
     if args.eval:
-        env = create_mujoco_env(trainer.config.env.env_name, video_path='videos')
+        env = create_mujoco_env(trainer.config.env.env_name, video_path=args.video_path)
         trainer.play(
             env=env,
             num_episodes=args.eval_n_episode,

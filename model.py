@@ -112,6 +112,13 @@ class ActorCritic(nn.Module):
         else:
             print("[Warning] Calling Actor::set_action_std() on discrete action space policy")
 
+    def set_action_std(self, action_std):
+        if self.is_cont:
+            self.action_std = action_std
+            self.action_var = torch.full((self.action_dim, ), self.action_std ** 2).to(self.device)
+        else:
+            print("[Warning] Calling Actor::set_action_std() on discrete action space policy")
+
 
     def forward(self, state, action=None):
         if self.shared_layer:
@@ -149,7 +156,7 @@ class Discriminator(nn.Module):
         self.is_cont    = config.env.is_continuous
         self.action_dim = config.env.action_dim
 
-        hidden_dim = config.hidden_dim
+        hidden_dim = config.gail.hidden_dim
         self.m = nn.Sequential(
             nn.Linear(config.state_dim + config.action_dim, hidden_dim),
             nn.Tanh(),
