@@ -47,22 +47,46 @@ python main.py --experiment_path=checkpoints/Ant/test
     <tr>
         <th>Ant-v4</th>
         <th><img src="https://github.com/Ladun/PPO/raw/master/plots/ant.png" alt="Ant-v4 Performance" width="500"/> </th>
-        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/ant.mp4" type="video/mp4"></video></th>
+<th>
+
+
+https://github.com/user-attachments/assets/c087dfec-924a-43bf-a5f0-9f6ffcf5a4bd
+
+
+</th>
     </tr>
     <tr>
         <th>Ant-v4<br/>(GAIL)</th>
         <th><img src="https://github.com/Ladun/PPO/raw/master/plots/ant_gail.png" alt="Ant-v4 Performance" width="500"/> </th>
-        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/ant_gail.mp4" type="video/mp4"></video></th>
+<th>
+  
+
+https://github.com/user-attachments/assets/76c0cddd-cdad-45ae-a9c2-4d518ac3e655
+
+       
+</th>
     </tr>
     <tr>
         <th>Reacher-v4</th>
         <th><img src="https://github.com/Ladun/PPO/raw/master/plots/reacher.png" alt="Ant-v4 Performance" width="500"/> </th>
-        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/reacher.mp4" type="video/mp4"></video></th>
+<th>
+    
+
+https://github.com/user-attachments/assets/13a58082-d4cc-483d-bab9-e330404ca8f7
+
+
+</th>
     </tr>
     <tr>
         <th>HalfCheetah-v4</th>
         <th><img src="https://github.com/Ladun/PPO/raw/master/plots/cheetah.png" alt="Ant-v4 Performance" width="500"/> </th>
-        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/cheetah.mp4" type="video/mp4"></video></th>
+<th>
+    
+
+https://github.com/user-attachments/assets/39f5b3b6-7d50-4d3c-8333-08081b21a671
+
+
+</th>
     </tr>
 </table>
 
