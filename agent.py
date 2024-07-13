@@ -34,7 +34,7 @@ from utils.expert import get_expert_data
 logger = logging.getLogger(__name__)
 
 class PPOAgent:
-    def __init__(self, config):
+    def __init__(self, config, for_eval=False):
 
         self.config = config
         self.device = get_device(config.device)
@@ -44,7 +44,7 @@ class PPOAgent:
         self.env_rng_state = rng_state
         
         # -------- Define models --------
-        self.network = ActorCritic(config, self.device).to(self.device)
+        self.network = ActorCritic(config, self.device).to(self.device)        
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
             **self.config.network.optimizer
@@ -56,17 +56,19 @@ class PPOAgent:
                 {'params': self.disc.parameters(),
                 **config.gail.optimizer}
             ])
-
-            self.expert_data = get_expert_data(config)
+            
+            if not for_eval:
+                self.expert_data = get_expert_data(config)
 
         if self.config.train.scheduler:
             self.scheduler = WarmupLinearSchedule(optimizer=self.optimizer,
-                                                  warmup_steps=0,
-                                                  max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
+                                                warmup_steps=0,
+                                                max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
             if 'gail' in self.config:
                 self.disc_scheduler = WarmupLinearSchedule(optimizer=self.disc_optimizer,
-                                                           warmup_steps=0, 
-                                                           max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
+                                                        warmup_steps=0, 
+                                                        max_steps=self.config.train.total_timesteps // (self.config.train.max_episode_len * self.config.env.num_envs))
+                    
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config.train.reward_scaler:
             self.reward_scaler = RewardScaler(self.config.env.num_envs, gamma=self.config.train.gamma)
@@ -80,7 +82,6 @@ class PPOAgent:
         self.writer         = None
         self.memory         = None
         self.timesteps      = 0
-        self.trained_epoch  = 0
 
         logger.info("----------- Config -----------")
         pretty_config(config, logger=logger)
@@ -143,14 +144,14 @@ class PPOAgent:
 
         with open(os.path.join(ckpt_path, "appendix"), "w") as f:
             f.write(f"{self.timesteps}\n")
-            f.write(f"{self.trained_epoch}\n")
 
     @classmethod
     def load(cls, experiment_path, postfix, resume=True):
 
         config = get_config(os.path.join(experiment_path, "config.yaml"))
-        config.network.action_std_init = config.network.min_action_std
-        ppo_algo = PPOAgent(config)
+        if config.env.is_continuous:
+            config.network.action_std_init = config.network.min_action_std
+        ppo_algo = PPOAgent(config, for_eval=True)
         
         # Create a variable to indicate which path the model will be read from
         ckpt_path = os.path.join(experiment_path, "checkpoints", postfix)
@@ -179,7 +180,6 @@ class PPOAgent:
 
         if resume:
             ppo_algo.timesteps = int(lines[0])
-            ppo_algo.trained_epoch = int(lines[1])
             if os.path.exists(os.path.join(ckpt_path, 'env_rng_state.ckpt')):
                 ppo_algo.env_rng_state = torch.load(os.path.join(ckpt_path, 'env_rng_state.ckpt'), map_location='cpu')
 
@@ -200,7 +200,7 @@ class PPOAgent:
 
     def optimize_gail(self, data):
 
-        def gail_iter(batch_size, given_data):
+        def gail_iter(batch_size, given_data, num_for_loop=None):
             '''
             
             given_data: (state_tensor, action_tensor)
@@ -209,6 +209,12 @@ class PPOAgent:
             ob, ac = given_data
             total_size = len(ob)
             indices = np.arange(total_size)
+            if num_for_loop and len(indices) < num_for_loop:
+                # Adjusting the expert's data to match the number of data points of the learner
+                indices = np.append(indices, np.random.randint(0, 
+                                                               total_size, 
+                                                               num_for_loop - len(indices)))
+                total_size = len(indices)
             np.random.shuffle(indices)
             n_batches = total_size // batch_size
             for nb in range(n_batches):
@@ -219,20 +225,20 @@ class PPOAgent:
         discriminator_losses = []
         learner_accuracies = []
         expert_accuracies = []
+        
+        if self.config.gail.batch_size == -1:
+            self.config.gail.batch_size = max(len(data[0]), len(self.expert_data[0]))
 
         learner_iter = gail_iter(self.config.gail.batch_size, data[0:2])
-        expert_iter = gail_iter(self.config.gail.batch_size, self.expert_data)
+        expert_iter = gail_iter(self.config.gail.batch_size, self.expert_data, num_for_loop=len(data[0]))
 
         self.disc.train()
         for _ in range(self.config.gail.epoch):
             for ob, ac in learner_iter:
                 expert_ob, expert_ac = next(expert_iter)
 
-                learner_logit = self.disc(ob, ac)
-                learner_prob = torch.sigmoid(learner_logit)
-
-                expert_logit = self.disc(expert_ob, expert_ac)
-                expert_prob = torch.sigmoid(expert_logit)
+                learner_prob = self.disc(ob, ac)
+                expert_prob = self.disc(expert_ob, expert_ac)
 
                 learner_loss = loss_fn(learner_prob, torch.ones_like(learner_prob))
                 expert_loss = loss_fn(expert_prob, torch.zeros_like(expert_prob))
@@ -255,9 +261,9 @@ class PPOAgent:
         avg_learner_accuracy = np.mean(learner_accuracies)
         avg_expert_accuracy = np.mean(expert_accuracies)
 
-        self.writer.add_scalar("train/discrim_loss", avg_d_loss, self.trained_epoch)
-        self.writer.add_scalars("train/gail_learner_accuracy", avg_learner_accuracy, self.trained_epoch)
-        self.writer.add_scalars("train/gail_expert_accuracy", avg_expert_accuracy, self.trained_epoch)
+        self.writer.add_scalar("train_gail/discrim_loss", avg_d_loss, self.timesteps)
+        self.writer.add_scalar("train_gail/learner_accuracy", avg_learner_accuracy, self.timesteps)
+        self.writer.add_scalar("train_gail/expert_accuracy", avg_expert_accuracy, self.timesteps)
                                                         
 
     def optimize_ppo(self, data):
@@ -357,12 +363,10 @@ class PPOAgent:
             avg_value_loss = np.mean(value_losses)
             avg_total_loss = np.mean(total_losses)
 
-            self.writer.add_scalar("train/policy_loss", avg_policy_loss, self.trained_epoch)
-            self.writer.add_scalar("train/entropy_loss", avg_entropy_loss, self.trained_epoch)
-            self.writer.add_scalar("train/value_loss", avg_value_loss, self.trained_epoch)
-            self.writer.add_scalar("train/total_loss", avg_total_loss, self.trained_epoch)                 
-
-            self.trained_epoch += 1
+            self.writer.add_scalar("train/policy_loss", avg_policy_loss, self.timesteps)
+            self.writer.add_scalar("train/entropy_loss", avg_entropy_loss, self.timesteps)
+            self.writer.add_scalar("train/value_loss", avg_value_loss, self.timesteps)
+            self.writer.add_scalar("train/total_loss", avg_total_loss, self.timesteps)              
 
     def optimize(self, data):
         with self.timer_manager.get_timer("\tprepare_data"):
@@ -429,7 +433,8 @@ class PPOAgent:
         )        
           
         # for continuous action space
-        next_action_std_decay_step = self.config.network.action_std_decay_freq
+        if self.config.env.is_continuous:
+            next_action_std_decay_step = self.config.network.action_std_decay_freq
 
         '''
         Environment symbol's information
@@ -476,7 +481,10 @@ class PPOAgent:
                             state = torch.from_numpy(state).to(self.device, dtype=torch.float)
                             action, logprobs, _, values = self.network(state)
                             values = values.flatten() # reshape shape of the value to (num_envs,)
-                        next_state, reward, terminated, truncated, _ = envs.step(np.clip(action.cpu().numpy(), envs.action_space.low, envs.action_space.high))
+                        if self.config.env.is_continuous:
+                            next_state, reward, terminated, truncated, _ = envs.step(np.clip(action.cpu().numpy(), envs.action_space.low, envs.action_space.high))
+                        else:
+                            next_state, reward, terminated, truncated, _ = envs.step(action.cpu().numpy())
                         self.timesteps += self.config.env.num_envs
 
                         # update episodic_reward
@@ -485,8 +493,11 @@ class PPOAgent:
 
                         if 'gail' in self.config:
                             with torch.no_grad():
-                                reward = self.disc.get_irl_reward(state, action).cpu().detach().squeeze(-1).numpy()
-                                irl_episodic_reward += reward
+                                irl_reward = self.disc.get_irl_reward(state, action).cpu().detach().squeeze(-1).numpy()
+                                irl_episodic_reward += irl_reward
+                                
+                                alpha = min(1, self.timesteps / self.config.train.total_timesteps)
+                                reward = alpha * irl_reward + (1 - alpha) * reward
 
                         if self.config.train.reward_scaler:
                             reward = self.reward_scaler(reward, terminated + truncated)
@@ -559,13 +570,13 @@ class PPOAgent:
             self.writer.add_scalar("train/duration", avg_duration, self.timesteps)
             if 'gail' in self.config:
                 avg_irl_score = np.mean(irl_score_queue)
-                self.writer.add_scalar("train/irl_score", avg_irl_score, self.timesteps)
+                self.writer.add_scalar("train_gail/irl_score", avg_irl_score, self.timesteps)
             if self.config.train.scheduler:
                 for idx, lr in enumerate(self.scheduler.get_lr()):
                     self.writer.add_scalar(f"train/learning_rate{idx}", lr, self.timesteps)
                 if 'gail' in self.config:
                     for idx, lr in enumerate(self.disc_scheduler.get_lr()):
-                        self.writer.add_scalar(f"train/gail_learning_rate{idx}", lr, self.timesteps)
+                        self.writer.add_scalar(f"train_gail/learning_rate{idx}", lr, self.timesteps)
 
             # Printing for console
             remaining_num_of_optimize = int(math.ceil((self.config.train.total_timesteps - self.timesteps) /
@@ -608,9 +619,13 @@ class PPOAgent:
                     if self.config.train.observation_normalizer:
                         state = self.obs_normalizer(state, update=False)
                     action, _, _, _ = self.network(torch.from_numpy(state).unsqueeze(0).to(self.device, dtype=torch.float))
-                next_state, reward, terminated, truncated, info = env.step(np.clip(action.cpu().numpy().squeeze(0), 
-                                                                                   env.action_space.low, 
-                                                                                   env.action_space.high))
+                    
+                if self.config.env.is_continuous:
+                    next_state, reward, terminated, truncated, info = env.step(np.clip(action.cpu().numpy().squeeze(0), 
+                                                                                       env.action_space.low, 
+                                                                                       env.action_space.high))
+                else:
+                    next_state, reward, terminated, truncated, info = env.step(action.cpu().numpy().squeeze(0))
 
                 episodic_reward += reward
                 duration += 1

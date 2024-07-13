@@ -8,7 +8,7 @@ env:
     action_dim: 8
 checkpoint_path: "checkpoints/Ant"
 network:
-    action_std_init: 0.4
+    action_std_init: 0.3
     action_std_decay_rate: 0.01
     min_action_std: 0.1
     action_std_decay_freq: 3e5
@@ -16,15 +16,14 @@ network:
     optimizer:
         lr: 3e-4
 gail:
-    expert_dir: 'experts/Ant'
+    expert_dir: 'experts/Ant/fixed_std'
     hidden_dim: 100
     optimizer:
         lr: 1e-4
-        betas: [0.9, 0.999]
-        eps: 1e-5 
+        weight_decay: 0.2
         
-    epoch: 1
-    batch_size: 512
+    epoch: 10
+    batch_size: 1024
 train: 
     total_timesteps: 10000000
     max_episode_len: 1024

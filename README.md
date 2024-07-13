@@ -38,26 +38,36 @@ python main.py --experiment_path=checkpoints/Ant/test
 # Result
 
 ## Ant-v4
- ![](https://github.com/Ladun/PPO/blob/master/plots/ant.png) 
- 
-https://github.com/Ladun/PPO/assets/47883234/243abecb-16a4-4ffc-920f-70b644675660
-
-## Reacher-v4
-![](https://github.com/Ladun/PPO/blob/master/plots/reacher.png) 
-
-
-https://github.com/Ladun/PPO/assets/47883234/ff5705e9-b544-41af-a477-10459508f9ac
-
-## HalfCheetah-v4 
- ![](https://github.com/Ladun/PPO/blob/master/plots/cheetah.png) 
-
-https://github.com/Ladun/PPO/assets/47883234/5c1aabc2-f472-4bd1-b4bd-b44cf6cf39dd
+<table style="border: 2px;">
+    <tr>
+        <th>Environment</th>
+        <th>Performance Chart</th>
+        <th>Evaluation Video</th>
+    </tr>
+    <tr>
+        <th>Ant-v4</th>
+        <th><img src="https://github.com/Ladun/PPO/raw/master/plots/ant.png" alt="Ant-v4 Performance" width="500"/> </th>
+        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/ant.mp4" type="video/mp4"></video></th>
+    </tr>
+    <tr>
+        <th>Ant-v4<br/>(GAIL)</th>
+        <th><img src="https://github.com/Ladun/PPO/raw/master/plots/ant_gail.png" alt="Ant-v4 Performance" width="500"/> </th>
+        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/ant_gail.mp4" type="video/mp4"></video></th>
+    </tr>
+    <tr>
+        <th>Reacher-v4</th>
+        <th><img src="https://github.com/Ladun/PPO/raw/master/plots/reacher.png" alt="Ant-v4 Performance" width="500"/> </th>
+        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/reacher.mp4" type="video/mp4"></video></th>
+    </tr>
+    <tr>
+        <th>HalfCheetah-v4</th>
+        <th><img src="https://github.com/Ladun/PPO/raw/master/plots/cheetah.png" alt="Ant-v4 Performance" width="500"/> </th>
+        <th><video width="200" controls><source src="https://github.com/Ladun/PPO/raw/master/plots/cheetah.mp4" type="video/mp4"></video></th>
+    </tr>
+</table>
 
 
 # Reference
-- IMPLEMENTATION MATTERS IN DEEP POLICY GRADIENT
-
-
-S: A CASE STUDY ON PPO AND TRPO
+- IMPLEMENTATION MATTERS IN DEEP POLICY GRADIENTS: A CASE STUDY ON PPO AND TRPO
 - https://github.com/junkwhinger/PPO_PyTorch
 - https://github.com/nikhilbarhate99/PPO-PyTorch

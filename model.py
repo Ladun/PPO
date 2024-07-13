@@ -64,6 +64,7 @@ class ActorCritic(nn.Module):
             self.action_dim = config.env.action_dim
             self.action_std = config.network.action_std_init
             self.action_var = torch.full((self.action_dim, ), config.network.action_std_init ** 2).to(self.device)
+            # learnable std
             # self.actor_logstd = nn.Parameter(torch.log(torch.ones(1, config.env.action_dim) * config.network.action_std_init))
 
         if self.shared_layer:
@@ -71,7 +72,7 @@ class ActorCritic(nn.Module):
                 nn.Linear(config.env.state_dim, 64),
                 nn.Tanh(),
                 nn.Linear(64, 64),
-                nn.Tanh()
+                nn.Tanh() if config.env.is_continuous else nn.Softmax(dim=-1)
             )
             self.actor = nn.Sequential(
                 nn.Linear(64, config.env.action_dim),
@@ -86,7 +87,7 @@ class ActorCritic(nn.Module):
                 nn.Linear(64, 64),
                 nn.Tanh(),
                 nn.Linear(64, config.env.action_dim),
-                nn.Tanh()
+                nn.Tanh() if config.env.is_continuous else nn.Softmax(dim=-1)
             )
             self.critic = nn.Sequential(
                 nn.Linear(config.env.state_dim, 64),
@@ -132,6 +133,7 @@ class ActorCritic(nn.Module):
             cov_mat = torch.diag_embed(action_var).to(self.device)
             dist = MultivariateNormal(action_mean, cov_mat)
 
+            # for learnable std
             # action_logstd = self.actor_logstd.expand_as(action_mean)
             # action_std = torch.exp(action_logstd)
             # cov_mat = torch.diag_embed(action_std)
@@ -162,7 +164,8 @@ class Discriminator(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
         )
 
 
@@ -171,13 +174,12 @@ class Discriminator(nn.Module):
             action = torch.nn.functional.one_hot(action, self.action_dim).float()
         state_action = torch.cat([state, action], dim=1)
 
-        r = self.m(state_action)
+        prob = self.m(state_action)
 
-        return r
+        return prob
     
     def get_irl_reward(self, state, action):
-        logit = self.forward(state, action)
-        prob = torch.sigmoid(logit)
+        prob = self.forward(state, action)
 
         reward = -torch.log(prob)
 
