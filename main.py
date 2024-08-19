@@ -3,6 +3,9 @@ import argparse
 import logging
 
 import envpool
+import custom_env
+import gymnasium as gym
+from gymnasium.vector import AsyncVectorEnv
 
 from agent import PPOAgent
 from utils.general import get_config
@@ -32,6 +35,13 @@ def parse_args():
 
     return args
 
+def make_env(env_name):
+    def _init():
+        env = gym.make(env_name, env_config={"render_mode":"rgb_array"})
+        return env
+    return _init
+
+
 def main():
     args = parse_args()
 
@@ -52,13 +62,27 @@ def main():
         trainer = PPOAgent(config)        
 
     if args.train:
-        envs = envpool.make(trainer.config.env.env_name, 
-                            env_type="gymnasium", 
-                            num_envs=trainer.config.env.num_envs)
+        if trainer.config.env.env_name in envpool.list_all_envs():
+            envs = envpool.make(trainer.config.env.env_name, 
+                                env_type="gymnasium", 
+                                num_envs=trainer.config.env.num_envs)
+        else:
+            envs = AsyncVectorEnv([make_env(config.env.env_name) for _ in range(config.env.num_envs)])
+            
         trainer.step(envs, args.exp_name)
 
     if args.eval:
-        env = create_mujoco_env(trainer.config.env.env_name, video_path=args.video_path)
+        
+        if trainer.config.env.env_name in custom_env.env_list:
+        
+            if args.video_path:
+                env = gym.make(trainer.config.env.env_name, env_config={"render_mode": 'rgb_array'})
+                env = gym.wrappers.RecordVideo(env, args.video_path)
+            else:
+                env = gym.make(trainer.config.env.env_name, env_config={"render_mode": 'human'})
+        else:
+            env = create_mujoco_env(trainer.config.env.env_name, video_path=args.video_path)
+            
         trainer.play(
             env=env,
             num_episodes=args.eval_n_episode,
